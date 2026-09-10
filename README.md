@@ -123,7 +123,7 @@ Charge current (`allow_chg_a`), starting from 120 A, then the **lowest** of:
 | Hottest cell ≥ 45 °C | 20 A |
 | SOC ≥ 98 % | 10 A |
 | SOC ≥ 95 % | 40 A |
-| Charge complete: cell ≥ 3.50 V, SOC ≥ 95 %, \|I\| &lt; 3 A | 0 A, FET stays closed |
+| Charge complete: cell ≥ 3.50 V, SOC ≥ 95 %, current under 3 A | 0 A, FET stays closed |
 
 Discharge current (`allow_dsg_a`), starting from 150 A:
 
