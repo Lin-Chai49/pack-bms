@@ -1,0 +1,4 @@
+host/bms_test
+host/bms_test.dSYM/
+*.o
+.DS_Store
