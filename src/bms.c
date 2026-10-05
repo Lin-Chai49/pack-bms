@@ -105,7 +105,7 @@ static void protect(bms_t *b)
     trip_rel(&b->db_ocd, b->pack_ma >= BMS_OCD_MA, b->pack_ma < BMS_OC_REL_MA, &f, BMS_FLT_OCD);
     trip_rel(&b->db_ot, b->t_max_dC >= BMS_OT_DC, b->t_max_dC <= BMS_OT_REL_DC, &f, BMS_FLT_OT);
     trip_rel(&b->db_ut, b->t_min_dC <= BMS_UT_DC, b->t_min_dC >= BMS_UT_REL_DC, &f, BMS_FLT_UT);
-    trip_rel(&b->db_diff, dv >= BMS_DIFF_MV, dv < BMS_DIFF_REL_MV, &f, BMS_FLT_DIFF);
+    trip_rel(&b->db_diff, dv >= BMS_DIFF_MV, dv <= BMS_DIFF_REL_MV, &f, BMS_FLT_DIFF);
     trip_rel(&b->db_ow, ow, !ow, &f, BMS_FLT_OW);
 
     b->fault = f;
@@ -179,27 +179,31 @@ static void sop(bms_t *b, int chg, int dsg)
     b->min_dsg_v_x10 = (uint16_t)dv;
 }
 
+/* Latch on `trip`, drop on `release`, hold through the band between them. */
+static void hold_temp(uint8_t *hold, int trip, int release)
+{
+    if (trip) *hold = 1;
+    else if (release) *hold = 0;
+}
+
 static void mosfets(bms_t *b)
 {
     int chg = 1, dsg = 1;
-    int prev_chg = (b->status & BMS_ST_CHG_MOS) != 0;
-    int prev_dsg = (b->status & BMS_ST_DSG_MOS) != 0;
+
+    hold_temp(&b->hold_chg_ot, b->t_max_dC >= BMS_CHG_OT_DC, b->t_max_dC <= BMS_CHG_OT_REL_DC);
+    hold_temp(&b->hold_chg_ut, b->t_min_dC <= BMS_CHG_UT_DC, b->t_min_dC >= BMS_CHG_UT_REL_DC);
+    hold_temp(&b->hold_dsg_ot, b->t_max_dC >= BMS_OT_DC, b->t_max_dC <= BMS_OT_REL_DC);
+    hold_temp(&b->hold_dsg_ut, b->t_min_dC <= BMS_UT_DC, b->t_min_dC >= BMS_UT_REL_DC);
 
     if (b->fault & (BMS_FLT_OV | BMS_FLT_OCC | BMS_FLT_OT | BMS_FLT_UT | BMS_FLT_DIFF | BMS_FLT_OW))
         chg = 0;
     if (b->fault & (BMS_FLT_UV | BMS_FLT_OCD | BMS_FLT_OT | BMS_FLT_UT | BMS_FLT_DIFF | BMS_FLT_OW))
         dsg = 0;
 
-    /* Charge-only temperature: open the charge FET without a pack UT/OT fault. */
-    if (b->t_max_dC >= BMS_CHG_OT_DC) chg = 0;
-    else if (b->t_max_dC > BMS_CHG_OT_REL_DC && !prev_chg) chg = 0;
-    if (b->t_min_dC <= BMS_CHG_UT_DC) chg = 0;
-    else if (b->t_min_dC < BMS_CHG_UT_REL_DC && !prev_chg) chg = 0;
-
-    if (b->t_max_dC >= BMS_OT_DC) dsg = 0;
-    else if (b->t_max_dC > BMS_OT_REL_DC && !prev_dsg) dsg = 0;
-    if (b->t_min_dC <= BMS_UT_DC) dsg = 0;
-    else if (b->t_min_dC < BMS_UT_REL_DC && !prev_dsg) dsg = 0;
+    /* Charge-only limits have no fault bit. Pack OT/UT also open immediately,
+       before the 200 ms fault debounce, and stay open until their release. */
+    if (b->hold_chg_ot || b->hold_chg_ut) chg = 0;
+    if (b->hold_dsg_ot || b->hold_dsg_ut) dsg = 0;
 
     if (chg) b->status |= BMS_ST_CHG_MOS; else b->status &= (uint16_t)~BMS_ST_CHG_MOS;
     if (dsg) b->status |= BMS_ST_DSG_MOS; else b->status &= (uint16_t)~BMS_ST_DSG_MOS;
@@ -249,9 +253,14 @@ static void soc_rest(bms_t *b)
         b->status &= (uint16_t)~BMS_ST_REST;
     }
     if (b->rest_ms < BMS_REST_MS) return;
-    /* LFP mid-flat: only snap at the ends. Use the lowest cell (conservative). */
-    if (b->v_min_mv < 3200 || b->v_min_mv > 3400)
+    /* An open sense wire is not a cell voltage. Do not wipe the coulomb count. */
+    if (open_wire(b)) return;
+    /* LFP mid-flat: only snap at the ends. Use the lowest cell (conservative).
+       Drop the remainder so the old count cannot undo the snap on the next tick. */
+    if (b->v_min_mv < 3200 || b->v_min_mv > 3400) {
         b->soc_x10 = soc_from_mv(b->v_min_mv);
+        b->soc_resid = 0;
+    }
 }
 
 static int wants_bal(const bms_sample_t *s, const bms_t *b, int i)
@@ -269,7 +278,8 @@ static void balance(bms_t *b, const bms_sample_t *s)
 
     /* Bleed resistors dump heat into the pack — stop if already warm, and
        only the highest few cells, not every cell above the floor. */
-    if (idle_or_chg && spread >= BMS_BAL_DV_MV && b->v_max_mv >= BMS_BAL_MIN_MV
+    /* Open wire makes vmin look like 0 V, so every real cell would "win". */
+    if (idle_or_chg && !open_wire(b) && spread >= BMS_BAL_DV_MV && b->v_max_mv >= BMS_BAL_MIN_MV
         && b->t_max_dC < BMS_CHG_OT_DC) {
         for (k = 0; k < BMS_BAL_MAX; k++) {
             int best = -1, i;
@@ -334,9 +344,11 @@ void bms_init(bms_t *b, uint32_t cap_mah, uint16_t soc_x10)
     for (i = 0; i < (int)sizeof(*b); i++) ((uint8_t *)b)[i] = 0;
     b->cap_mah = cap_mah ? cap_mah : 200000;
     b->soc_x10 = soc_x10 > 1000 ? 1000 : soc_x10;
-    b->status = BMS_ST_CHG_MOS | BMS_ST_DSG_MOS;
-    bms_hal_set_chg_mos(1);
-    bms_hal_set_dsg_mos(1);
+    /* Stay open until the first tick has sampled. A full or hot pack must
+       not conduct during the gap between init and that tick. */
+    b->status = 0;
+    bms_hal_set_chg_mos(0);
+    bms_hal_set_dsg_mos(0);
     bms_hal_set_balance(0);
 }
 
@@ -375,7 +387,7 @@ void bms_clear_faults(bms_t *b)
     if (b->pack_ma < BMS_OC_REL_MA) { b->db_ocd = 0; f &= (uint16_t)~BMS_FLT_OCD; }
     if (b->t_max_dC <= BMS_OT_REL_DC) { b->db_ot = 0; f &= (uint16_t)~BMS_FLT_OT; }
     if (b->t_min_dC >= BMS_UT_REL_DC) { b->db_ut = 0; f &= (uint16_t)~BMS_FLT_UT; }
-    if (dv < BMS_DIFF_REL_MV) { b->db_diff = 0; f &= (uint16_t)~BMS_FLT_DIFF; }
+    if (dv <= BMS_DIFF_REL_MV) { b->db_diff = 0; f &= (uint16_t)~BMS_FLT_DIFF; }
     if (!ow) { b->db_ow = 0; f &= (uint16_t)~BMS_FLT_OW; }
     b->fault = f;
     mosfets(b);

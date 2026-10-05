@@ -102,6 +102,9 @@ typedef struct {
     uint32_t cap_mah;
     int16_t  cell_mv[BMS_N_CELL];
     uint8_t  db_ov, db_uv, db_occ, db_ocd, db_ot, db_ut, db_diff, db_ow;
+    /* Temperature lockouts. Set only by that limit, cleared only at its
+       release. Another fault opening the FET must not start the wait. */
+    uint8_t  hold_chg_ot, hold_chg_ut, hold_dsg_ot, hold_dsg_ut;
     uint32_t rest_ms;
     int64_t  soc_resid;
     int64_t  cyc_resid;

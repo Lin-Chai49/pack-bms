@@ -60,6 +60,8 @@ int main(void)
     memset(&g_s, 0, sizeof g_s);
     idle_pack();
     bms_init(&b, 200000, 500);
+    expect("init fets open", g_chg == 0 && g_dsg == 0);
+    expect("init balance off", g_bal == 0);
     ticks(&b, 5);
     expect("idle mos on", g_chg && g_dsg);
     expect("soc mid", b.soc_x10 >= 490 && b.soc_x10 <= 510);
@@ -165,9 +167,15 @@ int main(void)
     ticks(&b, 25);
     expect("OT", b.fault & BMS_FLT_OT);
     expect("both mos off on OT", g_chg == 0 && g_dsg == 0);
+    /* 55 C is still inside the pack-OT band. Release is 50 C. */
+    g_s.t_dC[0] = 550;
+    ticks(&b, 5);
+    expect("OT holds through 55C", b.fault & BMS_FLT_OT);
+    expect("both mos stay off through 55C", g_chg == 0 && g_dsg == 0);
     g_s.t_dC[0] = 400;
     ticks(&b, 5);
     expect("OT released", !(b.fault & BMS_FLT_OT));
+    expect("both mos on after OT", g_chg == 1 && g_dsg == 1);
 
     /* 3 C: still charge, but 0.2C and heater request. */
     idle_pack();
@@ -199,6 +207,77 @@ int main(void)
     ticks(&b, 5);
     expect("UT released", !(b.fault & BMS_FLT_UT));
 
+    /* 47 C never reached the 50 C charge cut. OV must not invent that wait.
+       set_cells() rewrites the thermistor, so set temperature after it. */
+    idle_pack();
+    set_cells(3480);
+    g_s.t_dC[0] = 470;
+    ticks(&b, 5);
+    expect("47C chg on", g_chg == 1 && g_dsg == 1);
+    expect("47C allow chg 20A", b.allow_chg_a == 20);
+    g_s.cell_mv[6] = 3700; /* spread 220 mV, under the 400 mV trip */
+    ticks(&b, 25);
+    expect("47C OV latches", b.fault & BMS_FLT_OV);
+    expect("47C chg off on OV", g_chg == 0);
+    expect("47C dsg stays on", g_dsg == 1);
+    g_s.cell_mv[6] = 3480;
+    ticks(&b, 5);
+    expect("47C OV clear", !(b.fault & BMS_FLT_OV));
+    expect("47C chg back after OV", g_chg == 1);
+    expect("47C allow still 20A", b.allow_chg_a == 20);
+
+    /* A real charge-over-temp still waits until 45.0 C. */
+    g_s.t_dC[0] = 520;
+    ticks(&b, 5);
+    expect("52C chg off", g_chg == 0);
+    g_s.t_dC[0] = 470;
+    ticks(&b, 5);
+    expect("47C chg stays off after 52C", g_chg == 0);
+    g_s.t_dC[0] = 450;
+    ticks(&b, 5);
+    expect("chg on at 45C", g_chg == 1);
+
+    /* 55 C derates discharge. It is not pack OT, so OCD must not hold DSG. */
+    idle_pack();
+    g_s.t_dC[0] = 550;
+    ticks(&b, 5);
+    expect("55C dsg on before OCD", g_dsg == 1);
+    expect("55C chg held", g_chg == 0);
+    g_s.pack_ma = 160000;
+    ticks(&b, 25);
+    expect("55C OCD", b.fault & BMS_FLT_OCD);
+    expect("55C dsg off on OCD", g_dsg == 0);
+    g_s.pack_ma = 0;
+    ticks(&b, 5);
+    expect("55C OCD clear", !(b.fault & BMS_FLT_OCD));
+    expect("55C dsg back", g_dsg == 1);
+    expect("55C chg still off", g_chg == 0);
+    expect("55C allow dsg 40A", b.allow_dsg_a == 40);
+    expect("55C no pack OT", !(b.fault & BMS_FLT_OT));
+
+    /* -15 C: charge stays off. UV must not hold discharge until -10 C. */
+    idle_pack();
+    g_s.t_dC[0] = -150;
+    ticks(&b, 5);
+    expect("-15C chg off dsg on", g_chg == 0 && g_dsg == 1);
+    expect("-15C not pack UT", !(b.fault & BMS_FLT_UT));
+    set_cells(2480);
+    g_s.cell_mv[2] = 2400; /* spread 80 mV */
+    g_s.t_dC[0] = -150;
+    g_s.pack_ma = 10000;
+    ticks(&b, 25);
+    expect("-15C UV", b.fault & BMS_FLT_UV);
+    expect("-15C dsg off on UV", g_dsg == 0);
+    expect("-15C chg off during UV", g_chg == 0);
+    set_cells(3300);
+    g_s.t_dC[0] = -150;
+    g_s.pack_ma = 0;
+    ticks(&b, 5);
+    expect("-15C UV clear", !(b.fault & BMS_FLT_UV));
+    expect("-15C no UT fault", !(b.fault & BMS_FLT_UT));
+    expect("-15C dsg back", g_dsg == 1);
+    expect("-15C chg still off", g_chg == 0);
+
     /* Missing NTC is fail-safe OT, not "assume 25 C". */
     idle_pack();
     g_s.t_dC[0] = g_s.t_dC[1] = g_s.t_dC[2] = g_s.t_dC[3] = INT16_MIN;
@@ -218,9 +297,15 @@ int main(void)
     ticks(&b, 15);
     expect("DIFF latches", b.fault & BMS_FLT_DIFF);
     expect("both mos off on DIFF", g_chg == 0 && g_dsg == 0);
-    set_cells(3300); /* 3500 vs 3300 is exactly 200 mV — still in hysteresis */
+    /* 3500 vs 3299 = 201 mV, still above the inclusive 200 mV release. */
+    g_s.cell_mv[1] = 3299;
     ticks(&b, 5);
-    expect("DIFF released", !(b.fault & BMS_FLT_DIFF));
+    expect("DIFF holds at 201 mV", b.fault & BMS_FLT_DIFF);
+    expect("both mos stay off at 201 mV", g_chg == 0 && g_dsg == 0);
+    g_s.cell_mv[1] = 3300; /* 3500 vs 3300 = 200 mV */
+    ticks(&b, 5);
+    expect("DIFF released at 200 mV", !(b.fault & BMS_FLT_DIFF));
+    expect("both mos on after DIFF", g_chg == 1 && g_dsg == 1);
 
     /* Balance near top */
     idle_pack();
@@ -274,6 +359,20 @@ int main(void)
     ticks(&b, 5);
     expect("open wire released", !(b.fault & BMS_FLT_OW));
 
+    /* A dead sense wire is not the lowest cell and not an empty pack. */
+    bms_init(&b, 200000, 500);
+    idle_pack();
+    ticks(&b, 2);
+    set_cells(3450);
+    g_s.cell_mv[4] = 0;
+    g_s.pack_ma = 0;
+    ticks(&b, 5);
+    expect("open wire no balance", g_bal == 0);
+    ticks(&b, 3100);
+    expect("open wire still latched", b.fault & BMS_FLT_OW);
+    expect("open wire keeps soc", b.soc_x10 == 500);
+    expect("open wire balance stays off", g_bal == 0);
+
     /* 100 A discharge, 36 s on 200 Ah -> 1 Ah -> 0.5% -> 5 counts of soc_x10 */
     idle_pack();
     g_s.pack_ma = 100000;
@@ -319,15 +418,21 @@ int main(void)
     idle_pack();
     set_cells(3100);
     g_s.pack_ma = 0;
+    /* One count short of a 0.1 % step. A snap that leaves this remainder
+       undoes itself on the next tick. */
+    b.soc_resid = (int64_t)b.cap_mah * 3600LL - 1;
     ticks(&b, 2900);
     expect("no ocv snap before 30s", b.soc_x10 == 500);
     ticks(&b, 150);
     expect("ocv snap at 3.10 V is 5%", b.soc_x10 == 50);
+    expect("ocv snap clears resid", b.soc_resid == 0);
     set_cells(3300);
     b.soc_x10 = 500;
+    b.soc_resid = (int64_t)b.cap_mah * 3600LL - 1;
     b.rest_ms = 0;
     ticks(&b, 3100);
     expect("no ocv snap in mid band", b.soc_x10 == 500);
+    expect("mid band keeps resid", b.soc_resid == (int64_t)b.cap_mah * 3600LL - 1);
 
     /* One high cell: CV holds current pack V (53.1 V), not 55.2 V. */
     idle_pack();

@@ -1,7 +1,7 @@
 CC = cc
 CFLAGS = -std=c99 -Wall -Wextra -O2 -Iinclude
-# Host test: ASan + UBSan catch NULL, overflow, INT32_MIN negation.
-TESTFLAGS = -std=c99 -Wall -Wextra -O1 -g -Iinclude -fsanitize=address,undefined
+# Host test: -Wpedantic, plus ASan and UBSan for NULL, overflow, and INT32_MIN.
+TESTFLAGS = -std=c99 -Wall -Wextra -Wpedantic -O1 -g -Iinclude -fsanitize=address,undefined
 
 .PHONY: test clean
 
