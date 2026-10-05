@@ -62,7 +62,7 @@
 
 #define BMS_FLG_FULL   (1u << 0)    /* charge complete: hold, I≈0 */
 #define BMS_FLG_EMPTY  (1u << 1)
-#define BMS_FLG_HEAT   (1u << 2)    /* pack heater requested (t <= 5.0 C) */
+#define BMS_FLG_HEAT   (1u << 2)    /* heater: coldest <= 5 C and hottest < 45 C */
 
 typedef enum {
     BMS_IDLE = 0,
@@ -105,6 +105,7 @@ typedef struct {
     /* Temperature lockouts. Set only by that limit, cleared only at its
        release. Another fault opening the FET must not start the wait. */
     uint8_t  hold_chg_ot, hold_chg_ut, hold_dsg_ot, hold_dsg_ut;
+    uint8_t  rest_snap;           /* 1 after this rest has applied an OCV snap */
     uint32_t rest_ms;
     int64_t  soc_resid;
     int64_t  cyc_resid;

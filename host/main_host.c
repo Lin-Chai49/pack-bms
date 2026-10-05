@@ -117,6 +117,37 @@ int main(void)
     ticks(&b, 5);
     expect("OV released after long hold", !(b.fault & BMS_FLT_OV));
 
+    /* A dip into the release region starts the 200 ms wait over.
+       A dip that only reaches the hysteresis band must not. */
+    idle_pack();
+    set_cells(3450);
+    g_s.cell_mv[6] = 3700; /* spread 250 mV, under the 400 mV trip */
+    g_s.pack_ma = -5000;
+    ticks(&b, 2);
+    expect("baseline no OV", !(b.fault & BMS_FLT_OV) && g_chg == 1);
+    ticks(&b, 8);
+    expect("100 ms OV does not latch", !(b.fault & BMS_FLT_OV));
+    g_s.cell_mv[6] = 3480;
+    ticks(&b, 1);
+    g_s.cell_mv[6] = 3700;
+    ticks(&b, 10);
+    expect("recovered OV wait starts over", !(b.fault & BMS_FLT_OV));
+    expect("chg on after recovered wait", g_chg == 1);
+    ticks(&b, 9); /* 19 ticks in the set region so far on this wait */
+    expect("OV wait not done at 190 ms", !(b.fault & BMS_FLT_OV));
+    g_s.cell_mv[6] = 3600; /* 3.60 V: not set, not release */
+    ticks(&b, 1);
+    expect("hysteresis dip keeps the wait", !(b.fault & BMS_FLT_OV));
+    expect("chg on through the dip", g_chg == 1);
+    g_s.cell_mv[6] = 3700;
+    ticks(&b, 1);
+    expect("OV still waiting after one tick back", !(b.fault & BMS_FLT_OV));
+    ticks(&b, 1);
+    expect("OV latches once the wait finishes", b.fault & BMS_FLT_OV);
+    expect("chg off when that OV latches", g_chg == 0);
+    g_s.cell_mv[6] = 3480;
+    ticks(&b, 2);
+
     /* Under-voltage. Keep spread under 400 mV or DIFF also opens the charge FET. */
     idle_pack();
     set_cells(2480);
@@ -184,6 +215,15 @@ int main(void)
     expect("3C chg still on", g_chg == 1);
     expect("3C chg derated 40A", b.allow_chg_a == 40);
     expect("3C heat flag", b.flags & BMS_FLG_HEAT);
+
+    /* Heater follows the coldest cell, unless another sensor is already hot. */
+    g_s.t_dC[1] = 470;
+    ticks(&b, 2);
+    expect("47C beside 3C blocks heater", (b.flags & BMS_FLG_HEAT) == 0);
+    expect("47C beside 3C derates to 20A", b.allow_chg_a == 20);
+    expect("47C beside 3C is not pack OT", !(b.fault & BMS_FLT_OT));
+    expect("47C beside 3C chg stays on", g_chg == 1);
+    g_s.t_dC[1] = INT16_MIN;
 
     /* -1 C: no charge (plating). Discharge stays on. Not a pack UT fault. */
     g_s.t_dC[0] = -10;
@@ -349,6 +389,20 @@ int main(void)
         expect("balance the high group", (g_bal & 0xFF00u) == 0);
     }
 
+    /* clear_faults re-samples. Bleed must follow that sample, and a hot
+       sample opens the FETs without latching a fault bit by itself. */
+    idle_pack();
+    set_cells(3450);
+    g_s.cell_mv[0] = 3520;
+    g_s.pack_ma = -2000;
+    ticks(&b, 5);
+    expect("bleed on before hot clear", g_bal != 0);
+    g_s.t_dC[0] = 600;
+    bms_clear_faults(&b);
+    expect("hot clear turns bleed off", g_bal == 0);
+    expect("hot clear opens both fets", g_chg == 0 && g_dsg == 0);
+    expect("hot clear does not latch OT", !(b.fault & BMS_FLT_OT));
+
     /* Open sense wire */
     idle_pack();
     g_s.cell_mv[4] = 0;
@@ -356,8 +410,11 @@ int main(void)
     expect("open wire", b.fault & BMS_FLT_OW);
     expect("both mos off on OW", g_chg == 0 && g_dsg == 0);
     g_s.cell_mv[4] = 3300;
-    ticks(&b, 5);
-    expect("open wire released", !(b.fault & BMS_FLT_OW));
+    ticks(&b, 10);
+    expect("open wire holds through 100 ms", b.fault & BMS_FLT_OW);
+    expect("fets stay open through that 100 ms", g_chg == 0 && g_dsg == 0);
+    ticks(&b, 10);
+    expect("open wire released at 200 ms", !(b.fault & BMS_FLT_OW));
 
     /* A dead sense wire is not the lowest cell and not an empty pack. */
     bms_init(&b, 200000, 500);
@@ -372,6 +429,11 @@ int main(void)
     expect("open wire still latched", b.fault & BMS_FLT_OW);
     expect("open wire keeps soc", b.soc_x10 == 500);
     expect("open wire balance stays off", g_bal == 0);
+    g_s.cell_mv[4] = 3450;
+    bms_clear_faults(&b);
+    expect("clear_faults releases open wire now", !(b.fault & BMS_FLT_OW));
+    expect("clear_faults closes fets on a fixed wire", g_chg == 1 && g_dsg == 1);
+    expect("clear_faults keeps soc", b.soc_x10 == 500);
 
     /* 100 A discharge, 36 s on 200 Ah -> 1 Ah -> 0.5% -> 5 counts of soc_x10 */
     idle_pack();
@@ -433,6 +495,27 @@ int main(void)
     ticks(&b, 3100);
     expect("no ocv snap in mid band", b.soc_x10 == 500);
     expect("mid band keeps resid", b.soc_resid == (int64_t)b.cap_mah * 3600LL - 1);
+
+    /* One snap per rest. 0.4 A is under the rest threshold and must still count.
+       900 ticks × 0.4 A × 10 ms = 3.6 A·s = 0.1 % of this 1 Ah pack. */
+    bms_init(&b, 1000, 500);
+    idle_pack();
+    set_cells(3100);
+    g_s.pack_ma = 0;
+    ticks(&b, 3000);
+    expect("snap once at 3.10 V", b.soc_x10 == 50);
+    expect("snap once clears resid", b.soc_resid == 0);
+    g_s.pack_ma = 400;
+    ticks(&b, 900);
+    expect("rest current still counts", b.soc_x10 == 49);
+    g_s.pack_ma = 1000;
+    ticks(&b, 5);
+    g_s.pack_ma = 0;
+    set_cells(2900);
+    ticks(&b, 2900);
+    expect("second rest not early", b.soc_x10 == 49);
+    ticks(&b, 200);
+    expect("second rest snaps again", b.soc_x10 == 20);
 
     /* One high cell: CV holds current pack V (53.1 V), not 55.2 V. */
     idle_pack();

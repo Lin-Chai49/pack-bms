@@ -70,16 +70,19 @@ static void pack_stats(bms_t *b, const bms_sample_t *s)
     }
 }
 
-/* Trip after DEB ticks in the set region. Clear as soon as analog is past release.
-   Do not count 0..255 on the way up: that delayed recovery by seconds. */
+/* Trip after DEB ticks in the set region. A tick in the hysteresis band sheds
+   one count; it does not erase the wait. Past release, clear at once and
+   start the wait over. Stop at DEB so the counter cannot wrap. */
 static void trip_rel(uint8_t *db, int in_set, int in_rel, uint16_t *f, uint16_t bit)
 {
     if (in_set) {
         if (*db < BMS_DEB_TICKS) (*db)++;
         if (*db >= BMS_DEB_TICKS) *f |= bit;
-    } else {
+    } else if (in_rel) {
         *db = 0;
-        if (in_rel) *f &= (uint16_t)~bit;
+        *f &= (uint16_t)~bit;
+    } else if (*db > 0) {
+        (*db)--;
     }
 }
 
@@ -106,7 +109,16 @@ static void protect(bms_t *b)
     trip_rel(&b->db_ot, b->t_max_dC >= BMS_OT_DC, b->t_max_dC <= BMS_OT_REL_DC, &f, BMS_FLT_OT);
     trip_rel(&b->db_ut, b->t_min_dC <= BMS_UT_DC, b->t_min_dC >= BMS_UT_REL_DC, &f, BMS_FLT_UT);
     trip_rel(&b->db_diff, dv >= BMS_DIFF_MV, dv <= BMS_DIFF_REL_MV, &f, BMS_FLT_DIFF);
-    trip_rel(&b->db_ow, ow, !ow, &f, BMS_FLT_OW);
+    /* Open wire has no band between set and release. Count the bad samples
+       up and the good ones back down, and only drop the bit at zero, so one
+       in-range sample cannot close the FETs. */
+    if (ow) {
+        if (b->db_ow < BMS_DEB_TICKS) b->db_ow++;
+        if (b->db_ow >= BMS_DEB_TICKS) f |= BMS_FLT_OW;
+    } else if (b->db_ow > 0) {
+        b->db_ow--;
+        if (b->db_ow == 0) f &= (uint16_t)~BMS_FLT_OW;
+    }
 
     b->fault = f;
 }
@@ -250,16 +262,21 @@ static void soc_rest(bms_t *b)
         b->status |= BMS_ST_REST;
     } else {
         b->rest_ms = 0;
+        b->rest_snap = 0;
         b->status &= (uint16_t)~BMS_ST_REST;
+        return;
     }
-    if (b->rest_ms < BMS_REST_MS) return;
-    /* An open sense wire is not a cell voltage. Do not wipe the coulomb count. */
+    if (b->rest_ms < BMS_REST_MS || b->rest_snap) return;
+    /* An open sense wire is not a cell voltage. Do not wipe the coulomb count.
+       Leave rest_snap clear so a later in-range sample during this rest can. */
     if (open_wire(b)) return;
     /* LFP mid-flat: only snap at the ends. Use the lowest cell (conservative).
-       Drop the remainder so the old count cannot undo the snap on the next tick. */
+       Once per rest. Drop the remainder so it cannot undo the snap, then keep
+       counting. A later load under 0.5 A is still real charge. */
     if (b->v_min_mv < 3200 || b->v_min_mv > 3400) {
         b->soc_x10 = soc_from_mv(b->v_min_mv);
         b->soc_resid = 0;
+        b->rest_snap = 1;
     }
 }
 
@@ -321,7 +338,9 @@ static void publish(bms_t *b)
 
     if (b->v_max_mv >= BMS_CELL_OV_REL_MV && b->soc_x10 >= 950 && ia < 3000) g |= BMS_FLG_FULL;
     if (b->v_min_mv <= BMS_CELL_UV_REL_MV || b->soc_x10 <= 50) g |= BMS_FLG_EMPTY;
-    if (b->t_min_dC <= BMS_CHG_UT_REL_DC) g |= BMS_FLG_HEAT;
+    /* Coldest cell wants heat, but not if another sensor is already hot. */
+    if (b->t_min_dC <= BMS_CHG_UT_REL_DC && b->t_max_dC < BMS_CHG_OT_REL_DC)
+        g |= BMS_FLG_HEAT;
     b->flags = g;
 
     rem = (uint64_t)b->cap_mah * (uint64_t)b->soc_x10 / 100000ull;
@@ -391,6 +410,9 @@ void bms_clear_faults(bms_t *b)
     if (!ow) { b->db_ow = 0; f &= (uint16_t)~BMS_FLT_OW; }
     b->fault = f;
     mosfets(b);
+    /* Same hardware outputs as a tick. A hot sample must drop the bleed
+       even when this call does not latch a new fault bit. */
+    balance(b, &s);
     publish(b);
     mode_of(b);
 }
