@@ -123,11 +123,20 @@ static void protect(bms_t *b)
     b->fault = f;
 }
 
+/* True once the pack has finished charging, until the cell or SOC leaves.
+   Current is only the way in: a spike above 3 A must not turn charge back on. */
+static int charge_done(const bms_t *b)
+{
+    int32_t ia = iabs_sat(b->pack_ma);
+    if (b->v_max_mv < BMS_CELL_OV_REL_MV || b->soc_x10 < 950) return 0;
+    if (ia < 3000) return 1;
+    return (b->flags & BMS_FLG_FULL) != 0;
+}
+
 static void sop(bms_t *b, int chg, int dsg)
 {
     uint16_t ca = (uint16_t)(BMS_OCC_MA / 1000);
     uint16_t da = (uint16_t)(BMS_OCD_MA / 1000);
-    int32_t ia = iabs_sat(b->pack_ma);
     int32_t cv, dv;
 
     if (!chg) ca = 0;
@@ -149,8 +158,7 @@ static void sop(bms_t *b, int chg, int dsg)
         if (b->soc_x10 >= 980) ca = umin(ca, 10);
         else if (b->soc_x10 >= 950) ca = umin(ca, 40);
 
-        /* Charge complete: hold voltage, no more current. */
-        if (b->v_max_mv >= BMS_CELL_OV_REL_MV && b->soc_x10 >= 950 && ia < 3000) ca = 0;
+        if (charge_done(b)) ca = 0;
     }
 
     if (!dsg) da = 0;
@@ -181,10 +189,18 @@ static void sop(bms_t *b, int chg, int dsg)
     if (cv > 65535) cv = 65535;
     b->max_chg_v_x10 = (uint16_t)cv;
 
+    /* 44.8 V until a cell sags through 2.80 V. Then hold the present pack
+       voltage until that cell is back to 2.90 V, so a small rebound does
+       not drop the cutoff and let the inverter start into the same cell. */
     dv = (int32_t)BMS_N_CELL * BMS_CELL_UV_REL_MV / 100; /* 16 × 2.80 V → 448 */
-    if (b->v_min_mv < BMS_CELL_UV_REL_MV) {
-        int32_t hold = b->pack_mv / 100;
-        if (hold > dv) dv = hold;
+    {
+        int floor = (int)dv;
+        int sag = b->v_min_mv < BMS_CELL_UV_REL_MV
+            || (b->min_dsg_v_x10 > (uint16_t)floor && b->v_min_mv < 2900);
+        if (sag) {
+            int32_t hold = b->pack_mv / 100;
+            if (hold > dv) dv = hold;
+        }
     }
     if (dv < 0) dv = 0;
     if (dv > 65535) dv = 65535;
@@ -228,8 +244,13 @@ static void mosfets(bms_t *b)
 static void soc_step(bms_t *b)
 {
     int64_t step = (int64_t)b->cap_mah * 3600LL; /* mA*ms per 0.1% */
+    int32_t ma = b->pack_ma;
     if (step <= 0) return;
-    b->soc_resid += (int64_t)b->pack_ma * BMS_TICK_MS;
+    /* An open FET is not a path. A shunt offset during a latched fault
+       must not walk SOC for hours. */
+    if (ma < 0 && !(b->status & BMS_ST_CHG_MOS)) ma = 0;
+    if (ma > 0 && !(b->status & BMS_ST_DSG_MOS)) ma = 0;
+    b->soc_resid += (int64_t)ma * BMS_TICK_MS;
     while (b->soc_resid >= step && b->soc_x10 > 0) {
         b->soc_x10--;
         b->soc_resid -= step;
@@ -244,9 +265,9 @@ static void soc_step(bms_t *b)
     if (b->soc_x10 == 1000 && b->soc_resid < 0) b->soc_resid = 0;
 
     /* One cycle = one full capacity actually leaving the pack. RAM only. */
-    if (b->pack_ma > BMS_REST_MA && (b->status & BMS_ST_DSG_MOS)) {
+    if (ma > BMS_REST_MA) {
         int64_t one = step * 1000;
-        b->cyc_resid += (int64_t)b->pack_ma * BMS_TICK_MS;
+        b->cyc_resid += (int64_t)ma * BMS_TICK_MS;
         while (one > 0 && b->cyc_resid >= one) {
             b->cyc_resid -= one;
             if (b->cycles < 65535) b->cycles++;
@@ -290,13 +311,15 @@ static void balance(bms_t *b, const bms_sample_t *s)
 {
     uint16_t mask = 0;
     int32_t spread = (int32_t)b->v_max_mv - (int32_t)b->v_min_mv;
-    int idle_or_chg = b->pack_ma < 1000;
+    /* Start under 1 A of discharge. Once on, stay through 2 A so a current
+       hovering at 1 A does not chatter the bleed resistors. */
+    int current_ok = (b->status & BMS_ST_BAL) ? (b->pack_ma < 2000) : (b->pack_ma < 1000);
     int k;
 
     /* Bleed resistors dump heat into the pack — stop if already warm, and
        only the highest few cells, not every cell above the floor. */
     /* Open wire makes vmin look like 0 V, so every real cell would "win". */
-    if (idle_or_chg && !open_wire(b) && spread >= BMS_BAL_DV_MV && b->v_max_mv >= BMS_BAL_MIN_MV
+    if (current_ok && !open_wire(b) && spread >= BMS_BAL_DV_MV && b->v_max_mv >= BMS_BAL_MIN_MV
         && b->t_max_dC < BMS_CHG_OT_DC) {
         for (k = 0; k < BMS_BAL_MAX; k++) {
             int best = -1, i;
@@ -322,7 +345,6 @@ static void publish(bms_t *b)
 {
     uint16_t w = 0, g = 0;
     int32_t dv = (int32_t)b->v_max_mv - (int32_t)b->v_min_mv;
-    int32_t ia = iabs_sat(b->pack_ma);
     uint64_t rem;
 
     if (b->v_max_mv >= BMS_CELL_OV_REL_MV) w |= BMS_WRN_OV;
@@ -336,7 +358,7 @@ static void publish(bms_t *b)
     if (b->soc_x10 >= 950) w |= BMS_WRN_HIGH;
     b->warn = w;
 
-    if (b->v_max_mv >= BMS_CELL_OV_REL_MV && b->soc_x10 >= 950 && ia < 3000) g |= BMS_FLG_FULL;
+    if (charge_done(b)) g |= BMS_FLG_FULL;
     if (b->v_min_mv <= BMS_CELL_UV_REL_MV || b->soc_x10 <= 50) g |= BMS_FLG_EMPTY;
     /* Coldest cell wants heat, but not if another sensor is already hot. */
     if (b->t_min_dC <= BMS_CHG_UT_REL_DC && b->t_max_dC < BMS_CHG_OT_REL_DC)

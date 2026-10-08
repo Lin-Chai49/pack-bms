@@ -376,6 +376,15 @@ int main(void)
     expect("full flag", b.flags & BMS_FLG_FULL);
     expect("full allow chg 0", b.allow_chg_a == 0);
     expect("full chg mos still on", g_chg == 1);
+    g_s.pack_ma = -8000;
+    ticks(&b, 5);
+    expect("full holds through 8 A", (b.flags & BMS_FLG_FULL) && b.allow_chg_a == 0 && g_chg == 1);
+    set_cells(3400);
+    g_s.pack_ma = -1000;
+    b.soc_x10 = 980;
+    ticks(&b, 2);
+    expect("full clears below 3.50 V", (b.flags & BMS_FLG_FULL) == 0);
+    expect("chg allowed after full clears", b.allow_chg_a == 10);
 
     /* At most 4 bleed resistors at once. */
     idle_pack();
@@ -388,6 +397,21 @@ int main(void)
         expect("balance at most 4", n == 4);
         expect("balance the high group", (g_bal & 0xFF00u) == 0);
     }
+
+    /* Already bleeding: stay on through 1.5 A, drop at 2 A, and do not
+       restart until discharge is back under 1 A. */
+    g_s.pack_ma = 1500;
+    ticks(&b, 3);
+    expect("balance holds at 1.5 A", g_bal != 0);
+    g_s.pack_ma = 2500;
+    ticks(&b, 3);
+    expect("balance off at 2.5 A", g_bal == 0);
+    g_s.pack_ma = 1500;
+    ticks(&b, 3);
+    expect("balance stays off at 1.5 A", g_bal == 0);
+    g_s.pack_ma = 0;
+    ticks(&b, 3);
+    expect("balance restarts at rest", g_bal != 0);
 
     /* clear_faults re-samples. Bleed must follow that sample, and a hot
        sample opens the FETs without latching a fault bit by itself. */
@@ -475,6 +499,45 @@ int main(void)
     ticks(&b, 3600);
     expect("discharge after full overshoot", b.soc_x10 == 995);
 
+    /* Open FET: shunt current in that direction does not move SOC. */
+    bms_init(&b, 200000, 500);
+    idle_pack();
+    ticks(&b, 2);
+    set_cells(3450);
+    g_s.cell_mv[6] = 3700; /* spread 250 mV, under the 400 mV trip */
+    g_s.pack_ma = 0;
+    ticks(&b, 25);
+    expect("OV open for soc gate", (b.fault & BMS_FLT_OV) && g_chg == 0 && g_dsg == 1);
+    g_s.pack_ma = -100000;
+    ticks(&b, 3600);
+    expect("open chg fet ignores charge current", b.soc_x10 == 500);
+    g_s.cell_mv[6] = 3450;
+    g_s.pack_ma = 0;
+    ticks(&b, 5);
+    expect("OV clear for soc gate", !(b.fault & BMS_FLT_OV) && g_chg == 1);
+    g_s.pack_ma = -100000;
+    ticks(&b, 3600);
+    expect("closed chg fet counts charge", b.soc_x10 == 505);
+
+    bms_init(&b, 200000, 500);
+    idle_pack();
+    ticks(&b, 2);
+    set_cells(2480);
+    g_s.cell_mv[2] = 2400; /* spread 80 mV */
+    g_s.pack_ma = 0;
+    ticks(&b, 25);
+    expect("UV open for soc gate", (b.fault & BMS_FLT_UV) && g_dsg == 0 && g_chg == 1);
+    g_s.pack_ma = 100000;
+    ticks(&b, 3600);
+    expect("open dsg fet ignores discharge current", b.soc_x10 == 500);
+    set_cells(3300);
+    g_s.pack_ma = 0;
+    ticks(&b, 5);
+    expect("UV clear for soc gate", !(b.fault & BMS_FLT_UV) && g_dsg == 1);
+    g_s.pack_ma = 100000;
+    ticks(&b, 3600);
+    expect("closed dsg fet counts discharge", b.soc_x10 == 495);
+
     /* Rest OCV snap only at the LFP ends, after 30 s. */
     bms_init(&b, 200000, 500);
     idle_pack();
@@ -522,6 +585,20 @@ int main(void)
     g_s.cell_mv[0] = 3600;
     ticks(&b, 5);
     expect("cv hold one high cell", b.max_chg_v_x10 == 531);
+
+    /* One low cell: cutoff rises to pack voltage and stays through 2.85 V. */
+    idle_pack();
+    set_cells(3000);
+    g_s.cell_mv[3] = 2700; /* spread 300 mV, under the 400 mV trip */
+    ticks(&b, 5);
+    expect("cutoff holds a 2.70 V cell", b.min_dsg_v_x10 == 477);
+    expect("2.70 V does not trip UV", !(b.fault & BMS_FLT_UV));
+    g_s.cell_mv[3] = 2850;
+    ticks(&b, 5);
+    expect("cutoff stays up at 2.85 V", b.min_dsg_v_x10 == 478);
+    g_s.cell_mv[3] = 2900;
+    ticks(&b, 5);
+    expect("cutoff releases at 2.90 V", b.min_dsg_v_x10 == 448);
 
     bms_init(&b, 200000, 500);
     idle_pack();

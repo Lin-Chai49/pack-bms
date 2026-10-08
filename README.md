@@ -133,7 +133,7 @@ Charge current (`allow_chg_a`), starting from 120 A, then the **lowest** of:
 | Hottest cell ≥ 45 °C | 20 A |
 | SOC ≥ 98 % | 10 A |
 | SOC ≥ 95 % | 40 A |
-| Charge complete: cell ≥ 3.50 V, SOC ≥ 95 %, current under 3 A | 0 A, FET stays closed |
+| Charge complete: cell ≥ 3.50 V, SOC ≥ 95 %, and current has been under 3 A | 0 A, FET stays closed |
 
 Discharge current (`allow_dsg_a`), starting from 150 A:
 
@@ -149,13 +149,15 @@ Discharge current (`allow_dsg_a`), starting from 150 A:
 
 Charge voltage (`max_chg_v_x10`): **55.2 V** (16 × 3.45 V). If one cell is already above 3.45 V, this becomes the **current pack voltage** so the inverter holds instead of pushing the high cell further.
 
-Discharge cutoff (`min_dsg_v_x10`): **44.8 V** (16 × 2.80 V).
+Discharge cutoff (`min_dsg_v_x10`): **44.8 V** (16 × 2.80 V). If the lowest cell sags below 2.80 V, the cutoff rises to the present pack voltage and stays there until that cell is back to 2.90 V. A rebound of a few tens of millivolts does not let the inverter start into the same cell.
+
+Charge complete, once entered, stays until the highest cell drops below 3.50 V or SOC drops below 95 %. A current spike above 3 A does not turn charge back on.
 
 Warnings (register 18) fire **before** a trip: 3.50 V, 2.80 V, 45 °C, 5 °C, 80 % of the over-current limits, 200 mV spread, SOC ≤ 10 % or ≥ 95 %.
 
 Flags (register 19):
 
-- `FULL` — charge complete (same rule as the 0 A row above)
+- `FULL` — charge complete (same rule as the 0 A row above). It stays set until the cell or the SOC leaves that window
 - `EMPTY` — lowest cell ≤ 2.80 V, or SOC ≤ 5 %
 - `HEAT` — coldest cell ≤ 5.0 °C and hottest cell &lt; 45.0 °C (a pack heater, if you have one, may turn on). A cell that is already at the charge over-temp warning does not get a heater request. This core does not drive a heater pin.
 
@@ -163,13 +165,13 @@ Flags (register 19):
 
 ## SOC, cycles, balance
 
-**SOC** is coulomb count on a remainder, so a 10 ms tick at household current does not round to zero. Units: `soc_x10 = 500` means 50.0 %. Remainder is discarded at 0 % and 100 %, otherwise a current-sensor offset at empty can sit in the remainder and block the next charge for a long time.
+**SOC** is coulomb count on a remainder, so a 10 ms tick at household current does not round to zero. Units: `soc_x10 = 500` means 50.0 %. Count only the direction whose FET is closed. Current reported while that FET is open does not move SOC: a shunt offset during a latched fault is not charge leaving or entering the pack. Remainder is discarded at 0 % and 100 %, otherwise a current-sensor offset at empty can sit in the remainder and block the next charge for a long time.
 
 After 30 s with \|I\| &lt; 0.5 A, SOC is snapped once from the **lowest** cell’s rest voltage, and only outside 3.20–3.40 V. LFP is too flat in the middle for voltage to mean SOC. The snap is skipped while any sense wire is open (under 0.50 V or over 4.80 V): a disconnected wire is not an empty cell, and it must not zero the coulomb count. If the wire is still open at 30 s, a later in-range sample during that same rest may snap. When a snap does run, the remainder is cleared, so a leftover just under 0.1 % cannot undo it. Further current under 0.5 A still counts. The pack snaps again only after current rises above 0.5 A and then rests for another 30 s. In the flat band the remainder is left alone; if the lowest cell later leaves that band during the same rest, the snap runs then.
 
 **Cycles** increment once per full `cap_mah` actually discharged (DSG FET on, current above rest). Stored in RAM. Persist it from your HAL if you care across power loss.
 
-**Balance** is passive, and only near the top: highest cell ≥ 3.40 V and spread ≥ 25 mV. At most four cells, the highest ones. Off when pack ≥ 50 °C (bleed resistors heat the cells), and off while a sense wire is open. An open wire would otherwise be the lowest cell, and every cell near the top would bleed. Mid-band 25 mV is ignored on purpose.
+**Balance** is passive, and only near the top: highest cell ≥ 3.40 V and spread ≥ 25 mV. At most four cells, the highest ones. It starts only while discharge current is under 1 A, and once it is on it stays through 2 A, so a current hovering at 1 A does not chatter the bleed resistors. Off when pack ≥ 50 °C (bleed resistors heat the cells), and off while a sense wire is open. An open wire would otherwise be the lowest cell, and every cell near the top would bleed. Mid-band 25 mV is ignored on purpose.
 
 ---
 
@@ -233,7 +235,7 @@ make test
 
 No MCU. Uses the fake AFE in `host/main_host.c`. The binary is gitignored. The same command runs on GitHub Actions for every push and pull request.
 
-Checks, among other things: FETs stay open until the first tick; 100 ms over-voltage pulse ignored; a one-tick dip to 3.60 V does not erase that wait, and a release to 3.48 V starts it over; `clear_faults` cannot speed debounce; over-voltage opens charge only; under-voltage opens discharge only (spread kept under 400 mV so a spread trip does not hide that); 55 °C stops charge, −1 °C stops charge, −21 °C opens both; a recovered over-voltage at 47 °C may charge again, a recovered over-current at 55 °C may discharge again, a recovered under-voltage at −15 °C may discharge again; a real 50 °C charge cut still waits for 45 °C, and a real 60 °C pack cut still holds at 55 °C; missing NTC is over-temp, not 25 °C; 0.2 C at 3 °C on the 200 Ah pack is 40 A; a 47 °C cell beside a 3 °C cell does not request heat; charge-complete; at most four bleed resistors; a hot `clear_faults` sample turns bleed off without latching over-temp; spread holds at 201 mV and releases at 200 mV; an open wire does not bleed and does not wipe SOC; the wire stays open through 100 ms back in range and releases at 200 ms, while `clear_faults` releases it on that sample; coulomb 100 A × 36 s on 200 Ah → −0.5 %; remainder clamp at 0 % / 100 %; rest snap at 3.10 V after 30 s clears the remainder, none at 3.30 V; after that snap a 0.4 A load still moves SOC, and a later rest can snap again; one high cell holds CV at pack voltage; signed current round-trip; `NULL` pointers.
+Checks, among other things: charge-complete holds through an 8 A spike and clears below 3.50 V; an open charge FET ignores charge current and an open discharge FET ignores discharge current; a cell below 2.80 V holds the discharge cutoff until 2.90 V; balance that is already on stays on at 1.5 A and drops at 2.5 A; FETs stay open until the first tick; 100 ms over-voltage pulse ignored; a one-tick dip to 3.60 V does not erase that wait, and a release to 3.48 V starts it over; `clear_faults` cannot speed debounce; over-voltage opens charge only; under-voltage opens discharge only (spread kept under 400 mV so a spread trip does not hide that); 55 °C stops charge, −1 °C stops charge, −21 °C opens both; a recovered over-voltage at 47 °C may charge again, a recovered over-current at 55 °C may discharge again, a recovered under-voltage at −15 °C may discharge again; a real 50 °C charge cut still waits for 45 °C, and a real 60 °C pack cut still holds at 55 °C; missing NTC is over-temp, not 25 °C; 0.2 C at 3 °C on the 200 Ah pack is 40 A; a 47 °C cell beside a 3 °C cell does not request heat; charge-complete; at most four bleed resistors; a hot `clear_faults` sample turns bleed off without latching over-temp; spread holds at 201 mV and releases at 200 mV; an open wire does not bleed and does not wipe SOC; the wire stays open through 100 ms back in range and releases at 200 ms, while `clear_faults` releases it on that sample; coulomb 100 A × 36 s on 200 Ah → −0.5 %; remainder clamp at 0 % / 100 %; rest snap at 3.10 V after 30 s clears the remainder, none at 3.30 V; after that snap a 0.4 A load still moves SOC, and a later rest can snap again; one high cell holds CV at pack voltage; signed current round-trip; `NULL` pointers.
 
 On an MCU, compile `src/bms.c` and `src/bms_regs.c` against your HAL.
 
