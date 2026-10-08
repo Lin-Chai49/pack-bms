@@ -656,6 +656,21 @@ int main(void)
     ticks(&b, 3000);
     expect("cold arrival does not fade", b.cap_mah == 20000);
 
+    /* Same 9.3 Ah, but the current is discharge while the rest voltage rises.
+       Taking the absolute value would fake a 10 Ah capacity. */
+    bms_init(&b, 20000, 500);
+    idle_pack();
+    ticks(&b, 2);
+    set_cells(3100);
+    g_s.pack_ma = 0;
+    ticks(&b, 3000);
+    g_s.pack_ma = 100000;
+    ticks(&b, 33480);
+    set_cells(3500);
+    g_s.pack_ma = 0;
+    ticks(&b, 3000);
+    expect("rising voltage needs charge current", b.cap_mah == 20000);
+
     /* Charge into an open FET is not capacity. */
     bms_init(&b, 20000, 500);
     idle_pack();

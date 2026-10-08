@@ -64,7 +64,7 @@
 #define BMS_WRN_LOW    (1u << 7)    /* SOC <= 10 % */
 #define BMS_WRN_HIGH   (1u << 8)    /* SOC >= 95 % */
 
-#define BMS_FLG_FULL   (1u << 0)    /* charge complete: hold, I≈0 */
+#define BMS_FLG_FULL   (1u << 0)    /* charge complete, latched through a current spike */
 #define BMS_FLG_EMPTY  (1u << 1)
 #define BMS_FLG_HEAT   (1u << 2)    /* heater: coldest <= 5 C and hottest < 45 C */
 

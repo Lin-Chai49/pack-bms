@@ -306,10 +306,15 @@ static void learn_apply(bms_t *b, uint16_t soc)
     uint32_t nom;
     int64_t next;
 
+    /* SOC up means charge went in (resid negative). The opposite pair is
+       discharge. Absolute value would invent capacity from a voltage glitch. */
+    if ((span > 0 && b->learn_resid > 0) || (span < 0 && b->learn_resid < 0))
+        return;
     if (span < 0) span = -span;
     if (span < 800) return;
     nom = b->cap_nom_mah;
     if (nom < 2) return;
+    if (b->learn_resid == INT64_MIN) return;
     ah = b->learn_resid < 0 ? (uint64_t)(-b->learn_resid) : (uint64_t)b->learn_resid;
     meas = ah / (3600ull * (uint64_t)span);
     if (meas > nom) meas = nom;
@@ -372,8 +377,8 @@ static void balance(bms_t *b, const bms_sample_t *s)
 {
     uint16_t mask = 0;
     int32_t spread = (int32_t)b->v_max_mv - (int32_t)b->v_min_mv;
-    /* Start under 1 A of discharge. Once on, stay through 2 A so a current
-       hovering at 1 A does not chatter the bleed resistors. */
+    /* Start under 1 A of discharge. Once on, stay while current is under 2 A
+       so a current hovering at 1 A does not chatter the bleed resistors. */
     int current_ok = (b->status & BMS_ST_BAL) ? (b->pack_ma < 2000) : (b->pack_ma < 1000);
     int k;
 
