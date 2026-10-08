@@ -98,9 +98,10 @@ static int open_wire(const bms_t *b)
 
 /* 2 A or more in a direction whose FET is commanded open. Milliamp earth
    leakage is below this shunt. A 0.5–2 A band sheds the wait instead of
-   erasing it. */
+   erasing it. Status is 0 until the first command; that gap is not a weld. */
 static int leak_set(const bms_t *b)
 {
+    if (!b->leak_live) return 0;
     if (!(b->status & BMS_ST_CHG_MOS) && b->pack_ma <= -BMS_LEAK_MA) return 1;
     if (!(b->status & BMS_ST_DSG_MOS) && b->pack_ma >= BMS_LEAK_MA) return 1;
     return 0;
@@ -255,8 +256,18 @@ static void mosfets(bms_t *b)
     if (b->hold_chg_ot || b->hold_chg_ut) chg = 0;
     if (b->hold_dsg_ot || b->hold_dsg_ut) dsg = 0;
 
+    /* Over-current releases below 20 A. A welded FET can still be passing
+       15 A. Reclosing here would zero the leak wait and hide that current.
+       Keep the FET that was already open until the wait finishes or the
+       current is back under 0.5 A. */
+    if (b->leak_live && (b->db_leak || leak_set(b))) {
+        if (!(b->status & BMS_ST_CHG_MOS)) chg = 0;
+        if (!(b->status & BMS_ST_DSG_MOS)) dsg = 0;
+    }
+
     if (chg) b->status |= BMS_ST_CHG_MOS; else b->status &= (uint16_t)~BMS_ST_CHG_MOS;
     if (dsg) b->status |= BMS_ST_DSG_MOS; else b->status &= (uint16_t)~BMS_ST_DSG_MOS;
+    b->leak_live = 1;
 
     bms_hal_set_chg_mos(chg);
     bms_hal_set_dsg_mos(dsg);

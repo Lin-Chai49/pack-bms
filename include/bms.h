@@ -117,6 +117,7 @@ typedef struct {
        release. Another fault opening the FET must not start the wait. */
     uint8_t  hold_chg_ot, hold_chg_ut, hold_dsg_ot, hold_dsg_ut;
     uint8_t  hold_dsg_cold;       /* 20 A discharge from -10 C until -5 C */
+    uint8_t  leak_live;           /* 1 after the first FET command. Init is not a leak. */
     uint8_t  rest_snap;           /* 1 after this rest has applied an OCV snap */
     uint32_t rest_ms;
     int64_t  soc_resid;

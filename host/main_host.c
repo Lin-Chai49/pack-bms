@@ -149,6 +149,7 @@ int main(void)
     expect("OV latches once the wait finishes", b.fault & BMS_FLT_OV);
     expect("chg off when that OV latches", g_chg == 0);
     g_s.cell_mv[6] = 3480;
+    g_s.pack_ma = 0;
     ticks(&b, 2);
 
     /* Under-voltage. Keep spread under 400 mV or DIFF also opens the charge FET. */
@@ -163,6 +164,7 @@ int main(void)
 
     set_cells(3300);
     g_s.cell_mv[2] = 2850;
+    g_s.pack_ma = 0; /* 10 A left on the open FET would be the leak wait */
     ticks(&b, 5);
     expect("UV released", !(b.fault & BMS_FLT_UV));
 
@@ -229,6 +231,42 @@ int main(void)
     ticks(&b, 5);
     expect("discharge leak clears", !(b.fault & BMS_FLT_LEAK) && !(b.fault & BMS_FLT_UV)
            && g_chg == 1 && g_dsg == 1);
+
+    /* Init leaves both commands open. Current on that first sample is the
+       load the FETs are about to connect, not a weld. */
+    bms_init(&b, 200000, 500);
+    idle_pack();
+    g_s.pack_ma = 10000;
+    ticks(&b, 30);
+    expect("current at boot is not a leak", !(b.fault & BMS_FLT_LEAK) && g_chg == 1 && g_dsg == 1);
+
+    /* Over-current releases below 20 A. 15 A is still enough to be a leak,
+       so the FET must stay open and finish the wait. */
+    idle_pack();
+    g_s.pack_ma = 160000;
+    ticks(&b, 25);
+    expect("OCD armed for leak", (b.fault & BMS_FLT_OCD) && g_dsg == 0 && g_chg == 1);
+    g_s.pack_ma = 15000;
+    ticks(&b, 10);
+    expect("15 A holds dsg open", !(b.fault & BMS_FLT_OCD) && !(b.fault & BMS_FLT_LEAK)
+           && g_dsg == 0 && g_chg == 1);
+    bms_clear_faults(&b);
+    expect("clear does not finish leak", !(b.fault & BMS_FLT_LEAK) && g_dsg == 0);
+    ticks(&b, 10);
+    expect("15 A finishes leak", (b.fault & BMS_FLT_LEAK) && g_chg == 0 && g_dsg == 0);
+    g_s.pack_ma = 0;
+    ticks(&b, 2);
+    expect("leak hold releases", !(b.fault & BMS_FLT_LEAK) && g_chg == 1 && g_dsg == 1);
+
+    idle_pack();
+    g_s.pack_ma = -130000;
+    ticks(&b, 25);
+    g_s.pack_ma = -15000;
+    ticks(&b, 25);
+    expect("15 A charge finishes leak", (b.fault & BMS_FLT_LEAK) && g_chg == 0 && g_dsg == 0);
+    g_s.pack_ma = 0;
+    ticks(&b, 2);
+    expect("charge leak hold releases", !(b.fault & BMS_FLT_LEAK) && g_chg == 1 && g_dsg == 1);
 
     /* 55 C: charge inhibited (LFP), discharge still allowed. */
     idle_pack();
