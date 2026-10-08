@@ -129,7 +129,7 @@ Charge current (`allow_chg_a`), starting from 120 A, then the **lowest** of:
 | Highest cell ≥ 3.50 V | 20 A |
 | Highest cell ≥ 3.45 V | 60 A |
 | Coldest cell ≤ 0 °C, or hottest ≥ 50 °C | 0 A (FET already open) |
-| Coldest cell &lt; 10 °C | 0.2 C of `cap_mah` (40 A on 200 Ah) |
+| Coldest cell &lt; 10 °C | 0.2 C of usable `cap_mah` (40 A at the 200 Ah nameplate) |
 | Hottest cell ≥ 45 °C | 20 A |
 | SOC ≥ 98 % | 10 A |
 | SOC ≥ 95 % | 40 A |
@@ -169,7 +169,9 @@ Flags (register 19):
 
 After 30 s with \|I\| &lt; 0.5 A, SOC is snapped once from the **lowest** cell’s rest voltage, and only outside 3.20–3.40 V. LFP is too flat in the middle for voltage to mean SOC. The snap is skipped while any sense wire is open (under 0.50 V or over 4.80 V): a disconnected wire is not an empty cell, and it must not zero the coulomb count. If the wire is still open at 30 s, a later in-range sample during that same rest may snap. When a snap does run, the remainder is cleared, so a leftover just under 0.1 % cannot undo it. Further current under 0.5 A still counts. The pack snaps again only after current rises above 0.5 A and then rests for another 30 s. In the flat band the remainder is left alone; if the lowest cell later leaves that band during the same rest, the snap runs then.
 
-**Cycles** increment once per full `cap_mah` actually discharged (DSG FET on, current above rest). Stored in RAM. Persist it from your HAL if you care across power loss.
+**Usable capacity** (`cap_mah`) starts equal to the nameplate passed to `bms_init`. Coulomb counting and `remain_ah_x10` use it, so a faded pack does not keep advertising nameplate amp-hours. A rest snap below 3.20 V and a later rest snap above 3.40 V, in either order, measure the coulombs that passed while the matching FET was closed. The SOC gap between those snaps scales that throughput up to a full capacity. Both snaps must see every present sensor between 15 °C and 40 °C. A rest in the 3.20–3.40 V band does not start or finish a measurement. Usable capacity moves one quarter of the way toward the measurement, never above the nameplate, and a measurement below half the nameplate is ignored. One short or cold stroke cannot collapse the pack.
+
+**Cycles** increment once per full nameplate (`cap_nom_mah`) actually discharged (DSG FET on, current above rest). Fade does not make that counter run faster. Both values are RAM. Persist them from your HAL if you care across power loss. `bms_init` sets usable and nameplate to the same number; write a saved `cap_mah` back after init. A value outside half..full nameplate is pulled back onto that range on the next tick.
 
 **Balance** is passive, and only near the top: highest cell ≥ 3.40 V and spread ≥ 25 mV. At most four cells, the highest ones. It starts only while discharge current is under 1 A, and once it is on it stays through 2 A, so a current hovering at 1 A does not chatter the bleed resistors. Off when pack ≥ 50 °C (bleed resistors heat the cells), and off while a sense wire is open. An open wire would otherwise be the lowest cell, and every cell near the top would bleed. Mid-band 25 mV is ignored on purpose.
 
@@ -196,8 +198,8 @@ After 30 s with \|I\| &lt; 0.5 A, SOC is snapped once from the **lowest** cell�
 | 17 | balance mask | bit i = cell i bleeding |
 | 18 | warn | bit0 OV, 1 UV, 2 OT, 3 UT, 4 OCC, 5 OCD, 6 spread, 7 low SOC, 8 high SOC |
 | 19 | flags | bit0 charge-complete, 1 empty, 2 heater requested |
-| 20 | cycles | full-capacity discharges (RAM) |
-| 21 | remain_ah_x10 | 1000 = 100.0 Ah |
+| 20 | cycles | nameplate discharges (RAM) |
+| 21 | remain_ah_x10 | usable Ah × SOC. 1000 = 100.0 Ah |
 | 22 | max_chg_v_x10 | inverter CV, 0.1 V |
 | 23 | min_dsg_v_x10 | inverter cutoff, 0.1 V |
 | 32–47 | cell mV | cell 1..16 |
@@ -235,7 +237,7 @@ make test
 
 No MCU. Uses the fake AFE in `host/main_host.c`. The binary is gitignored. The same command runs on GitHub Actions for every push and pull request.
 
-Checks, among other things: charge-complete holds through an 8 A spike and clears below 3.50 V; an open charge FET ignores charge current and an open discharge FET ignores discharge current; a cell below 2.80 V holds the discharge cutoff until 2.90 V; balance that is already on stays on at 1.5 A and drops at 2.5 A; FETs stay open until the first tick; 100 ms over-voltage pulse ignored; a one-tick dip to 3.60 V does not erase that wait, and a release to 3.48 V starts it over; `clear_faults` cannot speed debounce; over-voltage opens charge only; under-voltage opens discharge only (spread kept under 400 mV so a spread trip does not hide that); 55 °C stops charge, −1 °C stops charge, −21 °C opens both; a recovered over-voltage at 47 °C may charge again, a recovered over-current at 55 °C may discharge again, a recovered under-voltage at −15 °C may discharge again; a real 50 °C charge cut still waits for 45 °C, and a real 60 °C pack cut still holds at 55 °C; missing NTC is over-temp, not 25 °C; 0.2 C at 3 °C on the 200 Ah pack is 40 A; a 47 °C cell beside a 3 °C cell does not request heat; charge-complete; at most four bleed resistors; a hot `clear_faults` sample turns bleed off without latching over-temp; spread holds at 201 mV and releases at 200 mV; an open wire does not bleed and does not wipe SOC; the wire stays open through 100 ms back in range and releases at 200 ms, while `clear_faults` releases it on that sample; coulomb 100 A × 36 s on 200 Ah → −0.5 %; remainder clamp at 0 % / 100 %; rest snap at 3.10 V after 30 s clears the remainder, none at 3.30 V; after that snap a 0.4 A load still moves SOC, and a later rest can snap again; one high cell holds CV at pack voltage; signed current round-trip; `NULL` pointers.
+Checks, among other things: 9.3 Ah from 3.10 V to 3.50 V on a 20 Ah pack moves usable capacity from 20.000 Ah to 17.500 Ah, and the return stroke continues to 15.625 Ah; a flat-band rest, a 1 Ah stroke, a 10 °C arrival, and charge into an open FET do not move it; a stroke that measures above nameplate stays at nameplate; usable capacity written below half nameplate is pulled back to half, and one nameplate discharged is still one cycle; charge-complete holds through an 8 A spike and clears below 3.50 V; an open charge FET ignores charge current and an open discharge FET ignores discharge current; a cell below 2.80 V holds the discharge cutoff until 2.90 V; balance that is already on stays on at 1.5 A and drops at 2.5 A; FETs stay open until the first tick; 100 ms over-voltage pulse ignored; a one-tick dip to 3.60 V does not erase that wait, and a release to 3.48 V starts it over; `clear_faults` cannot speed debounce; over-voltage opens charge only; under-voltage opens discharge only (spread kept under 400 mV so a spread trip does not hide that); 55 °C stops charge, −1 °C stops charge, −21 °C opens both; a recovered over-voltage at 47 °C may charge again, a recovered over-current at 55 °C may discharge again, a recovered under-voltage at −15 °C may discharge again; a real 50 °C charge cut still waits for 45 °C, and a real 60 °C pack cut still holds at 55 °C; missing NTC is over-temp, not 25 °C; 0.2 C at 3 °C on the 200 Ah pack is 40 A; a 47 °C cell beside a 3 °C cell does not request heat; charge-complete; at most four bleed resistors; a hot `clear_faults` sample turns bleed off without latching over-temp; spread holds at 201 mV and releases at 200 mV; an open wire does not bleed and does not wipe SOC; the wire stays open through 100 ms back in range and releases at 200 ms, while `clear_faults` releases it on that sample; coulomb 100 A × 36 s on 200 Ah → −0.5 %; remainder clamp at 0 % / 100 %; rest snap at 3.10 V after 30 s clears the remainder, none at 3.30 V; after that snap a 0.4 A load still moves SOC, and a later rest can snap again; one high cell holds CV at pack voltage; signed current round-trip; `NULL` pointers.
 
 On an MCU, compile `src/bms.c` and `src/bms_regs.c` against your HAL.
 
@@ -244,7 +246,7 @@ On an MCU, compile `src/bms.c` and `src/bms_regs.c` against your HAL.
 ## What this is not
 
 - A customer dashboard or household EMS ([home-solar-ess](https://github.com/Lin-Chai49/home-solar-ess) is a separate simulator)
-- SOH, thermal-runaway percentage, or an LLM
+- An SOH percentage, a thermal-runaway percentage, or an LLM
 - A drop-in `.hex` for a specific BMS PCB
 - Microsecond short-circuit protection, stuck-FET detection, precharge, or a CAN/Modbus stack
 - A substitute for analog hardware protection (AFE comparators, fuse)

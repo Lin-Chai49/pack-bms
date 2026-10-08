@@ -35,6 +35,10 @@
 #define BMS_REST_MA         500
 #define BMS_REST_MS         30000
 #define BMS_DEB_TICKS       20      /* 200 ms */
+/* Capacity is learned only from rest snaps at a mild temperature.
+   Cold capacity is not fade. 15.0 °C .. 40.0 °C. */
+#define BMS_LEARN_TMIN_DC   150
+#define BMS_LEARN_TMAX_DC   400
 
 #define BMS_FLT_OV     (1u << 0)
 #define BMS_FLT_UV     (1u << 1)
@@ -99,7 +103,8 @@ typedef struct {
     uint16_t allow_dsg_a;
     uint16_t max_chg_v_x10;       /* inverter CV, 0.1 V */
     uint16_t min_dsg_v_x10;       /* inverter cutoff, 0.1 V */
-    uint32_t cap_mah;
+    uint32_t cap_mah;             /* usable mAh. Coulomb count and remain Ah */
+    uint32_t cap_nom_mah;         /* nameplate, frozen at init. Cycles use this */
     int16_t  cell_mv[BMS_N_CELL];
     uint8_t  db_ov, db_uv, db_occ, db_ocd, db_ot, db_ut, db_diff, db_ow;
     /* Temperature lockouts. Set only by that limit, cleared only at its
@@ -109,6 +114,9 @@ typedef struct {
     uint32_t rest_ms;
     int64_t  soc_resid;
     int64_t  cyc_resid;
+    int64_t  learn_resid;         /* mA·ms since the last end-of-curve anchor */
+    uint16_t learn_soc;           /* soc_x10 at that anchor */
+    uint8_t  learn_end;           /* 1 below 3.20 V, 2 above 3.40 V, 0 none */
 } bms_t;
 
 void bms_init(bms_t *b, uint32_t cap_mah, uint16_t soc_x10);

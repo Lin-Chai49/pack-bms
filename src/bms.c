@@ -241,16 +241,32 @@ static void mosfets(bms_t *b)
     sop(b, chg, dsg);
 }
 
+/* Usable capacity stays inside half..full nameplate. A restored value
+   outside that is a bad save, not a measurement. */
+static void cap_hold(bms_t *b)
+{
+    uint32_t nom = b->cap_nom_mah;
+    uint32_t floor;
+    if (!nom) return;
+    floor = nom / 2;
+    if (!floor) floor = 1;
+    if (b->cap_mah > nom) b->cap_mah = nom;
+    else if (b->cap_mah < floor) b->cap_mah = floor;
+}
+
 static void soc_step(bms_t *b)
 {
-    int64_t step = (int64_t)b->cap_mah * 3600LL; /* mA*ms per 0.1% */
+    int64_t step;
     int32_t ma = b->pack_ma;
+    cap_hold(b);
+    step = (int64_t)b->cap_mah * 3600LL; /* mA*ms per 0.1% */
     if (step <= 0) return;
     /* An open FET is not a path. A shunt offset during a latched fault
        must not walk SOC for hours. */
     if (ma < 0 && !(b->status & BMS_ST_CHG_MOS)) ma = 0;
     if (ma > 0 && !(b->status & BMS_ST_DSG_MOS)) ma = 0;
     b->soc_resid += (int64_t)ma * BMS_TICK_MS;
+    b->learn_resid += (int64_t)ma * BMS_TICK_MS;
     while (b->soc_resid >= step && b->soc_x10 > 0) {
         b->soc_x10--;
         b->soc_resid -= step;
@@ -264,15 +280,58 @@ static void soc_step(bms_t *b)
     if (b->soc_x10 == 0 && b->soc_resid > 0) b->soc_resid = 0;
     if (b->soc_x10 == 1000 && b->soc_resid < 0) b->soc_resid = 0;
 
-    /* One cycle = one full capacity actually leaving the pack. RAM only. */
+    /* One cycle = one nameplate discharged. Fade must not speed this up. */
     if (ma > BMS_REST_MA) {
-        int64_t one = step * 1000;
+        int64_t one = (int64_t)b->cap_nom_mah * 3600LL * 1000;
         b->cyc_resid += (int64_t)ma * BMS_TICK_MS;
         while (one > 0 && b->cyc_resid >= one) {
             b->cyc_resid -= one;
             if (b->cycles < 65535) b->cycles++;
         }
     }
+}
+
+static int learn_temp_ok(const bms_t *b)
+{
+    return b->t_min_dC >= BMS_LEARN_TMIN_DC && b->t_max_dC <= BMS_LEARN_TMAX_DC;
+}
+
+/* Scale the coulombs between two opposite rest snaps up to a full capacity
+   and take one quarter of the error. One noisy stroke must not collapse
+   the pack. Below half the nameplate is a bad measurement, not fade. */
+static void learn_apply(bms_t *b, uint16_t soc)
+{
+    int32_t span = (int32_t)soc - (int32_t)b->learn_soc;
+    uint64_t ah, meas;
+    uint32_t nom;
+    int64_t next;
+
+    if (span < 0) span = -span;
+    if (span < 800) return;
+    nom = b->cap_nom_mah;
+    if (nom < 2) return;
+    ah = b->learn_resid < 0 ? (uint64_t)(-b->learn_resid) : (uint64_t)b->learn_resid;
+    meas = ah / (3600ull * (uint64_t)span);
+    if (meas > nom) meas = nom;
+    if (meas < nom / 2) return;
+    next = (int64_t)b->cap_mah + ((int64_t)meas - (int64_t)b->cap_mah) / 4;
+    if (next < (int64_t)(nom / 2)) next = (int64_t)(nom / 2);
+    if (next > (int64_t)nom) next = (int64_t)nom;
+    b->cap_mah = (uint32_t)next;
+}
+
+static void learn_on_snap(bms_t *b, uint16_t soc)
+{
+    int end = b->v_min_mv < 3200 ? 1 : 2;
+    if (learn_temp_ok(b) && b->learn_end && (int)b->learn_end != end)
+        learn_apply(b, soc);
+    if (learn_temp_ok(b)) {
+        b->learn_end = (uint8_t)end;
+        b->learn_soc = soc;
+    } else {
+        b->learn_end = 0;
+    }
+    b->learn_resid = 0;
 }
 
 static void soc_rest(bms_t *b)
@@ -295,7 +354,9 @@ static void soc_rest(bms_t *b)
        Once per rest. Drop the remainder so it cannot undo the snap, then keep
        counting. A later load under 0.5 A is still real charge. */
     if (b->v_min_mv < 3200 || b->v_min_mv > 3400) {
-        b->soc_x10 = soc_from_mv(b->v_min_mv);
+        uint16_t soc = soc_from_mv(b->v_min_mv);
+        learn_on_snap(b, soc);
+        b->soc_x10 = soc;
         b->soc_resid = 0;
         b->rest_snap = 1;
     }
@@ -384,6 +445,7 @@ void bms_init(bms_t *b, uint32_t cap_mah, uint16_t soc_x10)
     if (!b) return;
     for (i = 0; i < (int)sizeof(*b); i++) ((uint8_t *)b)[i] = 0;
     b->cap_mah = cap_mah ? cap_mah : 200000;
+    b->cap_nom_mah = b->cap_mah;
     b->soc_x10 = soc_x10 > 1000 ? 1000 : soc_x10;
     /* Stay open until the first tick has sampled. A full or hot pack must
        not conduct during the gap between init and that tick. */

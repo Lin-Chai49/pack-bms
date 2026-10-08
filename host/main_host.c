@@ -580,6 +580,113 @@ int main(void)
     ticks(&b, 200);
     expect("second rest snaps again", b.soc_x10 == 20);
 
+    /* Usable capacity. 100 A × 33480 ticks = 9.300 Ah. From 5 % (3.10 V)
+       to 98 % (3.50 V) that is 10.000 Ah full-scale. A 20.000 Ah nameplate
+       moves a quarter of the way, to 17.500 Ah. */
+    bms_init(&b, 20000, 500);
+    idle_pack();
+    ticks(&b, 2);
+    set_cells(3100);
+    g_s.pack_ma = 0;
+    ticks(&b, 3000);
+    expect("fade anchor keeps nameplate", b.cap_mah == 20000 && b.cap_nom_mah == 20000);
+    expect("fade anchor snaps to 5%", b.soc_x10 == 50);
+    g_s.pack_ma = -100000;
+    ticks(&b, 16740);
+    set_cells(3300);
+    g_s.pack_ma = 0;
+    ticks(&b, 3000);
+    expect("flat rest is not a fade stroke", b.cap_mah == 20000);
+    g_s.pack_ma = -100000;
+    ticks(&b, 16740);
+    set_cells(3500);
+    g_s.pack_ma = 0;
+    ticks(&b, 3000);
+    expect("fade moves a quarter toward 10 Ah", b.cap_mah == 17500);
+    expect("remain uses faded cap", b.remain_ah_x10 == 171);
+    expect("nameplate stays put", b.cap_nom_mah == 20000);
+    g_s.pack_ma = 100000;
+    ticks(&b, 33480);
+    set_cells(3100);
+    g_s.pack_ma = 0;
+    ticks(&b, 3000);
+    expect("return stroke fades further", b.cap_mah == 15625);
+
+    /* 19.000 Ah from 5 % measures 20.430 Ah and is clamped to nameplate.
+       100 A × 68400 ticks = 19.000 Ah, which lands SOC on 100 % exactly. */
+    bms_init(&b, 20000, 500);
+    idle_pack();
+    ticks(&b, 2);
+    set_cells(3100);
+    g_s.pack_ma = 0;
+    ticks(&b, 3000);
+    g_s.pack_ma = -100000;
+    ticks(&b, 68400);
+    set_cells(3500);
+    g_s.pack_ma = 0;
+    ticks(&b, 3000);
+    expect("fade cannot pass nameplate", b.cap_mah == 20000);
+
+    /* 1.000 Ah across the same window is under half the nameplate. */
+    bms_init(&b, 20000, 500);
+    idle_pack();
+    ticks(&b, 2);
+    set_cells(3100);
+    g_s.pack_ma = 0;
+    ticks(&b, 3000);
+    g_s.pack_ma = -100000;
+    ticks(&b, 3600);
+    set_cells(3500);
+    g_s.pack_ma = 0;
+    ticks(&b, 3000);
+    expect("short stroke does not fade", b.cap_mah == 20000);
+
+    /* 10.0 °C still allows charge. It is not a temperature to learn fade at. */
+    bms_init(&b, 20000, 500);
+    idle_pack();
+    ticks(&b, 2);
+    set_cells(3100);
+    g_s.pack_ma = 0;
+    ticks(&b, 3000);
+    g_s.pack_ma = -100000;
+    ticks(&b, 33480);
+    set_cells(3500);
+    g_s.t_dC[0] = 100;
+    g_s.pack_ma = 0;
+    ticks(&b, 3000);
+    expect("cold arrival does not fade", b.cap_mah == 20000);
+
+    /* Charge into an open FET is not capacity. */
+    bms_init(&b, 20000, 500);
+    idle_pack();
+    ticks(&b, 2);
+    set_cells(3100);
+    g_s.pack_ma = 0;
+    ticks(&b, 3000);
+    set_cells(3450);
+    g_s.cell_mv[6] = 3700;
+    g_s.pack_ma = 0;
+    ticks(&b, 25);
+    expect("OV open during fade", (b.fault & BMS_FLT_OV) && g_chg == 0);
+    g_s.pack_ma = -100000;
+    ticks(&b, 33480);
+    set_cells(3500);
+    g_s.pack_ma = 0;
+    ticks(&b, 3000);
+    expect("open chg fet is not capacity", b.cap_mah == 20000);
+
+    /* Cycles stay on the nameplate after usable capacity has shrunk. */
+    bms_init(&b, 1000, 500);
+    idle_pack();
+    ticks(&b, 2);
+    b.cap_mah = 100;
+    g_s.pack_ma = 0;
+    ticks(&b, 1);
+    expect("usable cap stays at half nameplate", b.cap_mah == 500 && b.cap_nom_mah == 1000);
+    g_s.pack_ma = 100000;
+    ticks(&b, 3600); /* 1.000 Ah out, the nameplate */
+    expect("cycle follows nameplate", b.cycles == 1);
+
     /* One high cell: CV holds current pack V (53.1 V), not 55.2 V. */
     idle_pack();
     g_s.cell_mv[0] = 3600;
