@@ -21,6 +21,10 @@
 #define BMS_CHG_UT_REL_DC   50
 #define BMS_UT_DC           -200    /* -20.0 C — pack too cold to discharge */
 #define BMS_UT_REL_DC       -100
+/* Soaked pack. 40 A below 0 C is too much at -10 C. Hold 20 A until -5 C.
+   The same -10 C point is where a rest voltage must not rewrite SOC. */
+#define BMS_DSG_COLD_DC     -100    /* -10.0 C */
+#define BMS_DSG_COLD_REL_DC -50     /* -5.0 C */
 
 #define BMS_OCC_MA          120000L
 #define BMS_OCD_MA          150000L
@@ -110,6 +114,7 @@ typedef struct {
     /* Temperature lockouts. Set only by that limit, cleared only at its
        release. Another fault opening the FET must not start the wait. */
     uint8_t  hold_chg_ot, hold_chg_ut, hold_dsg_ot, hold_dsg_ut;
+    uint8_t  hold_dsg_cold;       /* 20 A discharge from -10 C until -5 C */
     uint8_t  rest_snap;           /* 1 after this rest has applied an OCV snap */
     uint32_t rest_ms;
     int64_t  soc_resid;

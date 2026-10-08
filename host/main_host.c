@@ -231,6 +231,7 @@ int main(void)
     expect("cold not pack UT", !(b.fault & BMS_FLT_UT));
     expect("-1C chg off dsg on", g_chg == 0 && g_dsg == 1);
     expect("-1C allow chg 0", b.allow_chg_a == 0);
+    expect("-1C allow dsg 40A", b.allow_dsg_a == 40);
     g_s.t_dC[0] = 30;
     ticks(&b, 5);
     expect("chg off until 5C", g_chg == 0);
@@ -300,6 +301,7 @@ int main(void)
     g_s.t_dC[0] = -150;
     ticks(&b, 5);
     expect("-15C chg off dsg on", g_chg == 0 && g_dsg == 1);
+    expect("-15C allow dsg 20A", b.allow_dsg_a == 20);
     expect("-15C not pack UT", !(b.fault & BMS_FLT_UT));
     set_cells(2480);
     g_s.cell_mv[2] = 2400; /* spread 80 mV */
@@ -317,6 +319,46 @@ int main(void)
     expect("-15C no UT fault", !(b.fault & BMS_FLT_UT));
     expect("-15C dsg back", g_dsg == 1);
     expect("-15C chg still off", g_chg == 0);
+
+    /* -10 C is a current cap, not a FET trip. It holds through -8 C and
+       releases at -5 C. A cold rest must not rewrite SOC. */
+    idle_pack();
+    ticks(&b, 2); /* 25 C clears the -15 C current hold */
+    g_s.t_dC[0] = -90;
+    ticks(&b, 5);
+    expect("-9C allow dsg 40A", b.allow_dsg_a == 40 && g_dsg == 1 && g_chg == 0);
+    g_s.t_dC[0] = -100;
+    ticks(&b, 2);
+    expect("-10C allow dsg 20A", b.allow_dsg_a == 20);
+    expect("-10C heat still on", (b.flags & BMS_FLG_HEAT) != 0);
+    g_s.t_dC[0] = -80;
+    ticks(&b, 2);
+    expect("-8C discharge stays at 20A", b.allow_dsg_a == 20);
+    g_s.t_dC[0] = -50;
+    ticks(&b, 2);
+    expect("-5C discharge back to 40A", b.allow_dsg_a == 40 && g_chg == 0);
+
+    g_s.t_dC[0] = -210;
+    ticks(&b, 25);
+    expect("deep cold opens dsg", g_dsg == 0 && b.allow_dsg_a == 0);
+    g_s.t_dC[0] = -150;
+    ticks(&b, 5);
+    expect("UT holds dsg through -15C", g_dsg == 0 && (b.fault & BMS_FLT_UT));
+    g_s.t_dC[0] = -100;
+    ticks(&b, 5);
+    expect("UT release at -10C is 20A", g_dsg == 1 && b.allow_dsg_a == 20 && !(b.fault & BMS_FLT_UT));
+
+    bms_init(&b, 200000, 500);
+    idle_pack();
+    ticks(&b, 2);
+    set_cells(3100);
+    g_s.t_dC[0] = -150;
+    g_s.pack_ma = 0;
+    ticks(&b, 3000);
+    expect("no ocv snap below -10C", b.soc_x10 == 500 && b.soc_resid == 0);
+    g_s.t_dC[0] = 250;
+    ticks(&b, 2);
+    expect("warm rest snaps after the cold", b.soc_x10 == 50);
 
     /* Missing NTC is fail-safe OT, not "assume 25 C". */
     idle_pack();

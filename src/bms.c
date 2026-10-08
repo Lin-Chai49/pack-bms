@@ -167,6 +167,7 @@ static void sop(bms_t *b, int chg, int dsg)
         else if (b->v_min_mv <= 2900) da = umin(da, 60);
 
         if (b->t_min_dC <= BMS_UT_DC) da = 0;
+        else if (b->hold_dsg_cold) da = umin(da, 20);
         else if (b->t_min_dC < 0) da = umin(da, 40);
 
         if (b->t_max_dC >= BMS_OT_DC) da = 0;
@@ -222,6 +223,9 @@ static void mosfets(bms_t *b)
     hold_temp(&b->hold_chg_ut, b->t_min_dC <= BMS_CHG_UT_DC, b->t_min_dC >= BMS_CHG_UT_REL_DC);
     hold_temp(&b->hold_dsg_ot, b->t_max_dC >= BMS_OT_DC, b->t_max_dC <= BMS_OT_REL_DC);
     hold_temp(&b->hold_dsg_ut, b->t_min_dC <= BMS_UT_DC, b->t_min_dC >= BMS_UT_REL_DC);
+    /* Current cap only. Does not open the discharge FET. */
+    hold_temp(&b->hold_dsg_cold, b->t_min_dC <= BMS_DSG_COLD_DC,
+              b->t_min_dC >= BMS_DSG_COLD_REL_DC);
 
     if (b->fault & (BMS_FLT_OV | BMS_FLT_OCC | BMS_FLT_OT | BMS_FLT_UT | BMS_FLT_DIFF | BMS_FLT_OW))
         chg = 0;
@@ -355,6 +359,9 @@ static void soc_rest(bms_t *b)
     /* An open sense wire is not a cell voltage. Do not wipe the coulomb count.
        Leave rest_snap clear so a later in-range sample during this rest can. */
     if (open_wire(b)) return;
+    /* Cold rest voltage sits low. Do not treat that as an empty pack.
+       Leave rest_snap clear so this same rest can snap after the cells warm. */
+    if (b->t_min_dC <= BMS_DSG_COLD_DC) return;
     /* LFP mid-flat: only snap at the ends. Use the lowest cell (conservative).
        Once per rest. Drop the remainder so it cannot undo the snap, then keep
        counting. A later load under 0.5 A is still real charge. */
