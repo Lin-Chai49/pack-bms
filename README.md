@@ -2,7 +2,7 @@
 
 [![check](https://github.com/Lin-Chai49/pack-bms/actions/workflows/check.yml/badge.svg)](https://github.com/Lin-Chai49/pack-bms/actions/workflows/check.yml)
 
-Firmware core for the MCU on a **16-series LFP pack**. Each tick it samples the cells, commands the charge and discharge MOSFETs, bleeds the high cells near the top of charge, counts state of charge, and publishes a 48-word register image an inverter can read.
+Firmware core for the MCU on a **16-series LFP pack**. Each tick it samples the cells, commands the charge and discharge MOSFETs, counts state of charge, and publishes a 48-word register image an inverter can read. Near the top of charge it bleeds at most four high cells for 1.0 s, then turns those resistors off for one tick so the next voltage sample is taken with the resistors open.
 
 It is the pack controller, not a dashboard and not a `.hex` for a named board. You still write the analog-front-end driver, the MOSFET gate drive, and the fieldbus. The core is C99: no RTOS, no heap, no vendor HAL.
 
@@ -12,6 +12,7 @@ It is the pack controller, not a dashboard and not a `.hex` for a named board. Y
 | Call | `bms_tick()` every 10 ms |
 | Charge / discharge caps | 120 A / 150 A, about 6–7 kW on a 48 V bus |
 | Inverter CV / cutoff | 55.2 V / 44.8 V, then tapered as cells approach the ends |
+| Balance | At most four cells, and only near the top. On for 1.0 s, off for one tick, then choose again |
 | Sizing | Macros in `include/bms.h`. The inverter does not change them |
 
 The household simulator is a separate repository: [home-solar-ess](https://github.com/Lin-Chai49/home-solar-ess).
@@ -44,7 +45,7 @@ Charge and discharge are separate MOSFETs. Opening one direction leaves the othe
 
    Sixteen cells in series.
    Balance mask bit i turns on the bleed resistor across cell i.
-   At most four cells bleed at once.
+   At most four cells. On for 1.0 s, then off for one 10 ms tick.
 ```
 
 | Event | CHG | DSG |
@@ -109,6 +110,8 @@ for (;;) {
 
 `bms_init` commands both FETs open and balance off. They close on the first healthy tick. A full or hot pack does not conduct in the gap before that tick. Calling init again mid-run opens the FETs until the next tick. Current already flowing on that first sample is the load the FETs are about to connect. It is not treated as a welded FET.
 
+`bms_hal_set_balance` runs every tick. After each 1.0 s the mask is zero for one tick. Drive those resistors off before the next `bms_hal_sample`. If they stay on, the core treats the next voltages as unloaded and may choose cells from a sagged reading.
+
 Compile `src/bms.c` and `src/bms_regs.c` with your HAL `.c`. Do not link `host/main_host.c` on the MCU. That file is a fake front end for the desktop test.
 
 Fill `holding` from the **same context** as `bms_tick()`. Current is two 16-bit words, registers 7 and 8. A Modbus read from an ISR in the middle of `bms_regs_fill()` can tear them.
@@ -125,7 +128,7 @@ A fault bit waits 20 ticks (200 ms) inside its set region, then latches until th
 
 Open wire has no band between set and release. The bit stays until the wire has been in range for 200 ms, so one good sample cannot close the FETs.
 
-`bms_clear_faults()` samples again and drops bits that are already past release, including an open wire that is in range on that sample. It does not set new faults, and it does not advance debounce, so a tight loop cannot trip over-voltage faster than 200 ms. It also leaves a temperature hold that is still inside its band. It does refresh the balance mask, so bleed resistors follow that sample.
+`bms_clear_faults()` samples again and drops bits that are already past release, including an open wire that is in range on that sample. It does not set new faults, and it does not advance debounce, so a tight loop cannot trip over-voltage faster than 200 ms. It also leaves a temperature hold that is still inside its band. It does refresh balance. A hot sample or an open wire turns the resistors off on that call. While a balance window is still running and the top of the pack still qualifies, the mask already commanded is kept. That call does not add a cell.
 
 Spread releases at 200 mV inclusive. 201 mV stays latched. 200 mV clears.
 
@@ -240,13 +243,22 @@ Worked example, 20.000 Ah nameplate, 9.300 Ah from 3.10 V (5 %) to 3.50 V (98 %)
 
 ### Balance
 
-Passive balance runs only near the top: highest cell ≥ 3.40 V and spread ≥ 25 mV. At most four cells, the highest ones. It starts only while pack current is under 1 A of discharge. Charge current does not block it. Once balance is on, it stays while discharge current is under 2 A, so a current hovering at 1 A does not chatter the bleed resistors. It turns off at 2 A and does not restart until current is under 1 A again.
+Passive balance runs only near the top of charge. Charge current does not block it. Discharge current does.
 
-The resistors stay on for 1.0 s, then off for one 10 ms tick. Bleed current sags the cell, so a sample taken while the resistors are on is not used to add a cell. The tick after that off command is the unloaded sample, and it may add a cell. A session already running at 1.5 A continues across the gap. A highest cell below 3.40 V, a spread under 25 mV, or current of 2 A or more turns the resistors off on that tick and ends the session.
+| | Rule |
+|---|---|
+| Start | Discharge under 1 A, highest cell ≥ 3.40 V, spread ≥ 25 mV. At most four cells, the highest ones |
+| On | That same mask for 1.0 s. Discharge may rise to just under 2 A without dropping the resistors |
+| Gap | One tick with every resistor off. The next tick reads the cells unloaded and may choose a new set |
+| Stop on this tick | Highest cell &lt; 3.40 V, spread &lt; 25 mV, discharge ≥ 2 A, hottest cell ≥ 50 °C, or an open sense wire |
 
-Balance is off at or above 50 °C, because the bleed resistors heat the cells, and off while a sense wire is open. An open wire would otherwise look like the lowest cell, and every cell near the top would bleed. A 25 mV spread in the middle of the curve is ignored on purpose.
+Bleed current sags the cell under the resistor. A sample taken while the mask is on does not add a cell and does not drop one, as long as the pack still meets the voltage rules above. The set chosen on the unloaded tick is the set held for the next 1.0 s.
 
-The open controllers that talk to Tesla Model S module boards stop balance before they read cell voltage, and they time out a bleed command so a silent master cannot leave the resistors on. The 1.0 s window is that idea, written for this LFP pack. Their cell voltages, precharge contactor, module bus, and the setting that ignores a dead thermistor are not used here. A missing thermistor is still over-temperature.
+A session that was only paused for that measurement stays in the 2 A band, so 1.5 A continues after the gap. A stop at 2 A or more, or a stop because the top of the pack left the band, does not start again until discharge is under 1 A.
+
+Balance is off at or above 50 °C, because the bleed resistors heat the cells, and off while a sense wire is open. An open wire would otherwise look like the lowest cell, and every cell near the top would bleed. A 25 mV spread below 3.40 V is ignored on purpose.
+
+The open controllers for Tesla Model S module boards stop balance before they read cell voltage, and they put a timeout on the bleed command so a silent master cannot leave the resistors on. This 1.0 s window is that idea for an LFP pack. The core does not use their cell voltages, precharge contactor, module bus, or the setting that ignores a dead thermistor. A missing thermistor is still over-temperature.
 
 ---
 
@@ -258,7 +270,7 @@ Sixteen-bit holding registers. Addresses 24–31 are unused and read as 0. Cells
 |---|---|---|
 | 0 | proto | 1 |
 | 1 | n_cell | 16 |
-| 2 | status | bit0 CHG FET, bit1 DSG FET, bit2 balancing, bit3 rest |
+| 2 | status | bit0 CHG FET, bit1 DSG FET, bit2 a bleed resistor is commanded this tick, bit3 rest |
 | 3 | fault | bit0 OV, 1 UV, 2 OCC, 3 OCD, 4 OT, 5 UT, 6 spread, 7 open-wire, 8 open-FET current |
 | 4 | mode | 0 idle, 1 charge, 2 discharge, 3 protect |
 | 5 | soc_x10 | 500 = 50.0 % |
@@ -268,7 +280,7 @@ Sixteen-bit holding registers. Addresses 24–31 are unused and read as 0. Cells
 | 11–12 | v_max / v_min | mV. A negative voltage is published as 0 |
 | 13–14 | high / low cell | 1..16 |
 | 15–16 | allow charge / discharge | amperes. 0 = do not use that direction |
-| 17 | balance mask | bit i = cell i bleeding |
+| 17 | balance mask | bit i = cell i bleeding this tick. Zero for the one tick after each 1.0 s |
 | 18 | warn | bit0 OV, 1 UV, 2 OT, 3 UT, 4 OCC, 5 OCD, 6 spread, 7 low SOC, 8 high SOC |
 | 19 | flags | bit0 charge-complete, 1 empty, 2 heater requested |
 | 20 | cycles | nameplate discharges, RAM only |
