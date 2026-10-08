@@ -538,6 +538,38 @@ int main(void)
     ticks(&b, 3);
     expect("balance restarts at rest", g_bal != 0);
 
+    /* Resistors sag the cell they measure. Bleed for 1.0 s, then one tick
+       off, and only the following sample may add a cell. The 1.5 A session
+       continues across that gap; 2.5 A still ends it. */
+    g_s.pack_ma = 2500;
+    ticks(&b, 1);
+    expect("balance off before the window", g_bal == 0);
+    idle_pack();
+    set_cells(3450);
+    g_s.cell_mv[0] = 3520;
+    g_s.pack_ma = 0;
+    ticks(&b, 1);
+    expect("balance starts on an unloaded sample", g_bal == 1u);
+    g_s.cell_mv[1] = 3560;
+    ticks(&b, 1);
+    expect("loaded sample does not recruit", g_bal == 1u);
+    ticks(&b, 98);
+    expect("balance still on the original cell at 1 s", g_bal == 1u);
+    ticks(&b, 1);
+    expect("balance off for the unloaded sample", g_bal == 0);
+    ticks(&b, 1);
+    expect("unloaded sample recruits the higher cell", (g_bal & 3u) == 3u);
+    g_s.pack_ma = 1500;
+    ticks(&b, 99);
+    expect("balance holds the rest of the window at 1.5 A", g_bal != 0);
+    ticks(&b, 1);
+    expect("balance gaps at 1.5 A", g_bal == 0);
+    ticks(&b, 1);
+    expect("balance resumes at 1.5 A after the gap", g_bal != 0);
+    g_s.pack_ma = 2500;
+    ticks(&b, 1);
+    expect("balance ends at 2.5 A during a window", g_bal == 0);
+
     /* clear_faults re-samples. Bleed must follow that sample, and a hot
        sample opens the FETs without latching a fault bit by itself. */
     idle_pack();

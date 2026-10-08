@@ -36,6 +36,9 @@
 #define BMS_BAL_DV_MV       25
 #define BMS_BAL_MIN_MV      3400
 #define BMS_BAL_MAX         4       /* bleed resistors: at most 4 cells at once */
+/* Bleed sags the cell it is measuring. Stay on for 1.0 s, then one tick off,
+   so the next decision uses an unloaded sample. */
+#define BMS_BAL_ON_TICKS    100
 #define BMS_REST_MA         500
 #define BMS_LEAK_MA         2000    /* 2 A, in mA, through a FET commanded open */
 #define BMS_REST_MS         30000
@@ -118,6 +121,8 @@ typedef struct {
     uint8_t  hold_chg_ot, hold_chg_ut, hold_dsg_ot, hold_dsg_ut;
     uint8_t  hold_dsg_cold;       /* 20 A discharge from -10 C until -5 C */
     uint8_t  leak_live;           /* 1 after the first FET command. Init is not a leak. */
+    uint8_t  bal_left;            /* on-ticks still to command in this window */
+    uint8_t  bal_gap;             /* 1 after the unloaded tick; keep the 2 A hold */
     uint8_t  rest_snap;           /* 1 after this rest has applied an OCV snap */
     uint32_t rest_ms;
     int64_t  soc_resid;

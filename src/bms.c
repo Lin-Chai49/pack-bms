@@ -413,16 +413,32 @@ static void balance(bms_t *b, const bms_sample_t *s)
 {
     uint16_t mask = 0;
     int32_t spread = (int32_t)b->v_max_mv - (int32_t)b->v_min_mv;
-    /* Start under 1 A of discharge. Once on, stay while current is under 2 A
-       so a current hovering at 1 A does not chatter the bleed resistors. */
-    int current_ok = (b->status & BMS_ST_BAL) ? (b->pack_ma < 2000) : (b->pack_ma < 1000);
+    /* Start under 1 A of discharge. A session already on, including the one
+       tick the resistors are forced off, stays while current is under 2 A. */
+    int session = (b->status & BMS_ST_BAL) || b->bal_gap;
+    int current_ok = session ? (b->pack_ma < 2000) : (b->pack_ma < 1000);
+    int top_ok = spread >= BMS_BAL_DV_MV && b->v_max_mv >= BMS_BAL_MIN_MV;
     int k;
 
-    /* Bleed resistors dump heat into the pack — stop if already warm, and
-       only the highest few cells, not every cell above the floor. */
-    /* Open wire makes vmin look like 0 V, so every real cell would "win". */
-    if (current_ok && !open_wire(b) && spread >= BMS_BAL_DV_MV && b->v_max_mv >= BMS_BAL_MIN_MV
-        && b->t_max_dC < BMS_CHG_OT_DC) {
+    /* Bleed resistors dump heat into the pack — stop if already warm.
+       An open wire makes vmin look like 0 V, so every real cell would "win".
+       A sample taken with the resistors on reads low. Do not recruit from it.
+       Hold the mask for 1.0 s, then force one off tick and decide again. */
+    if (!current_ok || open_wire(b) || b->t_max_dC >= BMS_CHG_OT_DC) {
+        b->bal_left = 0;
+        b->bal_gap = 0;
+    } else if (b->bal_mask != 0) {
+        if (b->bal_left > 1 && top_ok) {
+            b->bal_left--;
+            mask = b->bal_mask;
+            b->bal_gap = 0;
+        } else {
+            /* Window done, or the top fell out of range. A still-valid top
+               is only a measurement gap, so the 2 A hold continues. */
+            b->bal_left = 0;
+            b->bal_gap = top_ok ? 1 : 0;
+        }
+    } else if (top_ok) {
         for (k = 0; k < BMS_BAL_MAX; k++) {
             int best = -1, i;
             int16_t bestv = INT16_MIN;
@@ -437,6 +453,11 @@ static void balance(bms_t *b, const bms_sample_t *s)
             if (best < 0) break;
             mask |= (uint16_t)(1u << best);
         }
+        b->bal_left = mask ? (uint8_t)BMS_BAL_ON_TICKS : 0;
+        b->bal_gap = 0;
+    } else {
+        b->bal_left = 0;
+        b->bal_gap = 0;
     }
     b->bal_mask = mask;
     if (mask) b->status |= BMS_ST_BAL; else b->status &= (uint16_t)~BMS_ST_BAL;
