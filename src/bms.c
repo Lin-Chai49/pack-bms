@@ -96,6 +96,23 @@ static int open_wire(const bms_t *b)
     return 0;
 }
 
+/* 2 A or more in a direction whose FET is commanded open. Milliamp earth
+   leakage is below this shunt. A 0.5–2 A band sheds the wait instead of
+   erasing it. */
+static int leak_set(const bms_t *b)
+{
+    if (!(b->status & BMS_ST_CHG_MOS) && b->pack_ma <= -BMS_LEAK_MA) return 1;
+    if (!(b->status & BMS_ST_DSG_MOS) && b->pack_ma >= BMS_LEAK_MA) return 1;
+    return 0;
+}
+
+static int leak_rel(const bms_t *b)
+{
+    int chg_ok = (b->status & BMS_ST_CHG_MOS) || b->pack_ma > -BMS_REST_MA;
+    int dsg_ok = (b->status & BMS_ST_DSG_MOS) || b->pack_ma < BMS_REST_MA;
+    return chg_ok && dsg_ok;
+}
+
 static void protect(bms_t *b)
 {
     uint16_t f = b->fault;
@@ -109,6 +126,7 @@ static void protect(bms_t *b)
     trip_rel(&b->db_ot, b->t_max_dC >= BMS_OT_DC, b->t_max_dC <= BMS_OT_REL_DC, &f, BMS_FLT_OT);
     trip_rel(&b->db_ut, b->t_min_dC <= BMS_UT_DC, b->t_min_dC >= BMS_UT_REL_DC, &f, BMS_FLT_UT);
     trip_rel(&b->db_diff, dv >= BMS_DIFF_MV, dv <= BMS_DIFF_REL_MV, &f, BMS_FLT_DIFF);
+    trip_rel(&b->db_leak, leak_set(b), leak_rel(b), &f, BMS_FLT_LEAK);
     /* Open wire has no band between set and release. Count the bad samples
        up and the good ones back down, and only drop the bit at zero, so one
        in-range sample cannot close the FETs. */
@@ -227,9 +245,9 @@ static void mosfets(bms_t *b)
     hold_temp(&b->hold_dsg_cold, b->t_min_dC <= BMS_DSG_COLD_DC,
               b->t_min_dC >= BMS_DSG_COLD_REL_DC);
 
-    if (b->fault & (BMS_FLT_OV | BMS_FLT_OCC | BMS_FLT_OT | BMS_FLT_UT | BMS_FLT_DIFF | BMS_FLT_OW))
+    if (b->fault & (BMS_FLT_OV | BMS_FLT_OCC | BMS_FLT_OT | BMS_FLT_UT | BMS_FLT_DIFF | BMS_FLT_OW | BMS_FLT_LEAK))
         chg = 0;
-    if (b->fault & (BMS_FLT_UV | BMS_FLT_OCD | BMS_FLT_OT | BMS_FLT_UT | BMS_FLT_DIFF | BMS_FLT_OW))
+    if (b->fault & (BMS_FLT_UV | BMS_FLT_OCD | BMS_FLT_OT | BMS_FLT_UT | BMS_FLT_DIFF | BMS_FLT_OW | BMS_FLT_LEAK))
         dsg = 0;
 
     /* Charge-only limits have no fault bit. Pack OT/UT also open immediately,
@@ -504,6 +522,7 @@ void bms_clear_faults(bms_t *b)
     if (b->t_min_dC >= BMS_UT_REL_DC) { b->db_ut = 0; f &= (uint16_t)~BMS_FLT_UT; }
     if (dv <= BMS_DIFF_REL_MV) { b->db_diff = 0; f &= (uint16_t)~BMS_FLT_DIFF; }
     if (!ow) { b->db_ow = 0; f &= (uint16_t)~BMS_FLT_OW; }
+    if (leak_rel(b)) { b->db_leak = 0; f &= (uint16_t)~BMS_FLT_LEAK; }
     b->fault = f;
     mosfets(b);
     /* Same hardware outputs as a tick. A hot sample must drop the bleed

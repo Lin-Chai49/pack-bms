@@ -90,6 +90,9 @@ int main(void)
     expect("charge mos off", g_chg == 0);
     expect("discharge still on", g_dsg == 1);
     expect("allow chg 0", b.allow_chg_a == 0);
+    /* The charge has stopped. Another 200 ms at 20 A would be current
+       through the open FET, and that holds the FET after the cell recovers. */
+    g_s.pack_ma = 0;
 
     /* Hysteresis: 3.60 V is below set, above release — stay latched. */
     g_s.cell_mv[6] = 3600;
@@ -110,7 +113,7 @@ int main(void)
     /* Long hold used to wrap the debounce counter and delay recovery by seconds. */
     set_cells(3450);
     g_s.cell_mv[6] = 3700;
-    g_s.pack_ma = -20000;
+    g_s.pack_ma = 0;
     ticks(&b, 100);
     expect("OV still latched after 1s", b.fault & BMS_FLT_OV);
     g_s.cell_mv[6] = 3480;
@@ -184,6 +187,48 @@ int main(void)
     g_s.pack_ma = 0;
     ticks(&b, 5);
     expect("OCC released", !(b.fault & BMS_FLT_OCC));
+
+    /* Current through a commanded-open FET. 100 ms must not latch.
+       A one-tick dip into 0.5–2 A sheds the wait. 200 ms opens the other FET. */
+    idle_pack();
+    set_cells(3450);
+    g_s.cell_mv[6] = 3700; /* spread 250 mV */
+    g_s.pack_ma = 0;
+    ticks(&b, 25);
+    expect("leak baseline OV", (b.fault & BMS_FLT_OV) && g_chg == 0 && g_dsg == 1);
+    g_s.pack_ma = -400;
+    ticks(&b, 25);
+    expect("offset is not a leak", !(b.fault & BMS_FLT_LEAK) && g_dsg == 1);
+    g_s.pack_ma = -3000;
+    ticks(&b, 10);
+    expect("100 ms leak ignored", !(b.fault & BMS_FLT_LEAK) && g_dsg == 1);
+    g_s.pack_ma = -1000;
+    ticks(&b, 1);
+    g_s.pack_ma = -3000;
+    ticks(&b, 10);
+    expect("leak wait survives one dip", !(b.fault & BMS_FLT_LEAK));
+    ticks(&b, 1);
+    expect("leak latches", (b.fault & BMS_FLT_LEAK) && g_chg == 0 && g_dsg == 0);
+    bms_clear_faults(&b);
+    expect("clear refused while leak current", (b.fault & BMS_FLT_LEAK) != 0);
+    g_s.pack_ma = 0;
+    ticks(&b, 2);
+    expect("leak releases at rest", !(b.fault & BMS_FLT_LEAK) && g_dsg == 1 && g_chg == 0);
+
+    idle_pack();
+    set_cells(2480);
+    g_s.cell_mv[2] = 2400; /* spread 80 mV */
+    g_s.pack_ma = 0;
+    ticks(&b, 25);
+    expect("leak baseline UV", (b.fault & BMS_FLT_UV) && g_dsg == 0 && g_chg == 1);
+    g_s.pack_ma = 3000;
+    ticks(&b, 25);
+    expect("discharge leak opens charge", (b.fault & BMS_FLT_LEAK) && g_chg == 0 && g_dsg == 0);
+    g_s.pack_ma = 0;
+    set_cells(3300);
+    ticks(&b, 5);
+    expect("discharge leak clears", !(b.fault & BMS_FLT_LEAK) && !(b.fault & BMS_FLT_UV)
+           && g_chg == 1 && g_dsg == 1);
 
     /* 55 C: charge inhibited (LFP), discharge still allowed. */
     idle_pack();

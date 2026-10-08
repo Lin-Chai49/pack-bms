@@ -37,6 +37,7 @@
 #define BMS_BAL_MIN_MV      3400
 #define BMS_BAL_MAX         4       /* bleed resistors: at most 4 cells at once */
 #define BMS_REST_MA         500
+#define BMS_LEAK_MA         2000    /* 2 A, in mA, through a FET commanded open */
 #define BMS_REST_MS         30000
 #define BMS_DEB_TICKS       20      /* 200 ms */
 /* Capacity is learned only from rest snaps at a mild temperature.
@@ -52,6 +53,7 @@
 #define BMS_FLT_UT     (1u << 5)
 #define BMS_FLT_DIFF   (1u << 6)
 #define BMS_FLT_OW     (1u << 7)
+#define BMS_FLT_LEAK   (1u << 8)    /* current through a commanded-open FET */
 
 #define BMS_ST_CHG_MOS (1u << 0)
 #define BMS_ST_DSG_MOS (1u << 1)
@@ -110,7 +112,7 @@ typedef struct {
     uint32_t cap_mah;             /* usable mAh. Coulomb count and remain Ah */
     uint32_t cap_nom_mah;         /* nameplate, frozen at init. Cycles use this */
     int16_t  cell_mv[BMS_N_CELL];
-    uint8_t  db_ov, db_uv, db_occ, db_ocd, db_ot, db_ut, db_diff, db_ow;
+    uint8_t  db_ov, db_uv, db_occ, db_ocd, db_ot, db_ut, db_diff, db_ow, db_leak;
     /* Temperature lockouts. Set only by that limit, cleared only at its
        release. Another fault opening the FET must not start the wait. */
     uint8_t  hold_chg_ot, hold_chg_ut, hold_dsg_ot, hold_dsg_ut;

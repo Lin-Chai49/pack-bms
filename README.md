@@ -34,8 +34,9 @@ Charge and discharge FETs are **independent**:
 | Pack too hot (≥ 60 °C) or too cold (≤ −20 °C) | open | open |
 | Cell spread ≥ 400 mV, or open sense wire | open | open |
 | Charge-only cold (≤ 0 °C) or charge-only hot (≥ 50 °C) | open **this tick** | stays on |
+| ≥ 2 A through a FET commanded open, for 200 ms | open | open |
 
-That last row is not a latched pack fault. LFP should not be charged below 0 °C (plating) and charge is cut at 50 °C, but the pack can still discharge.
+Charge-only cold and charge-only hot are not a latched pack fault. LFP should not be charged below 0 °C (plating) and charge is cut at 50 °C, but the pack can still discharge. Open-FET current is a latched fault and opens both FETs.
 
 Each temperature limit remembers only itself. It opens on its own set point and closes only at its own release. Over-voltage, over-current, or under-voltage opening a FET does not start that wait. At 47 °C a recovered over-voltage may charge again, derated to 20 A. At 55 °C a recovered over-current may discharge again, derated to 40 A. At −15 °C a recovered under-voltage may discharge again, at 20 A; charge stays off until 5.0 °C. There is no outdoor thermometer. “Below −10 °C” means the coldest cell thermistor.
 
@@ -84,7 +85,7 @@ Compile `src/bms.c` and `src/bms_regs.c` with your HAL `.c`. Do not link `host/m
 
 Fill `holding` from the **same context** as `bms_tick()`. Current is two 16-bit words (registers 7 and 8). A Modbus read from an ISR in the middle of `bms_regs_fill()` can tear them.
 
-The inverter must obey `allow_chg_a`, `allow_dsg_a`, `max_chg_v_x10`, and `min_dsg_v_x10`. If it keeps charging into an open charge FET, that is the inverter’s bug (or a stuck FET), not this core.
+The inverter must obey `allow_chg_a`, `allow_dsg_a`, `max_chg_v_x10`, and `min_dsg_v_x10`. Current at or above 2 A through a FET that was commanded open latches a leak fault after 200 ms and opens the other FET too.
 
 AFE chips this was sized for: anything that can report 16 cell voltages (BQ76952, ADBMS6830, …). This repo does not contain an I²C driver for them.
 
@@ -112,8 +113,11 @@ Spread releases at 200 mV inclusive. 201 mV stays latched; 200 mV clears.
 | Discharge under-temp (fault bit) | −20.0 °C | −10.0 °C |
 | Cell spread | 400 mV | 200 mV |
 | Open sense wire | &lt; 0.50 V or &gt; 4.80 V | in range for 200 ms |
+| Open-FET current | ≥ 2 A in the open direction | back under 0.5 A |
 
 Open-wire at 0 V also looks like under-voltage and a huge spread. The extra bit is so the inverter can show “sense wire”, not a second path to the FETs.
+
+Open-FET current is the pack shunt. A welded FET or an inverter that keeps pushing into an open direction shows up here, and both FETs open. Between 0.5 A and 2 A the wait sheds one tick. This is not a chassis insulation check: milliamp earth leakage is below the shunt, and a residual-current device still belongs in the installation if that is the hazard.
 
 ---
 
@@ -187,7 +191,7 @@ After 30 s with \|I\| &lt; 0.5 A, SOC is snapped once from the **lowest** cell�
 | 0 | proto | 1 |
 | 1 | n_cell | 16 |
 | 2 | status | bit0 CHG FET, bit1 DSG FET, bit2 balancing, bit3 rest |
-| 3 | fault | bit0 OV, 1 UV, 2 OCC, 3 OCD, 4 OT, 5 UT, 6 spread, 7 open-wire |
+| 3 | fault | bit0 OV, 1 UV, 2 OCC, 3 OCD, 4 OT, 5 UT, 6 spread, 7 open-wire, 8 open-FET current |
 | 4 | mode | 0 idle, 1 charge, 2 discharge, 3 protect |
 | 5 | soc_x10 | 500 = 50.0 % |
 | 6 | pack_V_x10 | 0.1 V |
@@ -238,7 +242,7 @@ make test
 
 No MCU. Uses the fake AFE in `host/main_host.c`. The binary is gitignored. The same command runs on GitHub Actions for every push and pull request.
 
-Checks, among other things: 9.3 Ah from 3.10 V to 3.50 V on a 20 Ah pack moves usable capacity from 20.000 Ah to 17.500 Ah, and the return stroke continues to 15.625 Ah; a flat-band rest, a 1 Ah stroke, a 10 °C arrival, charge into an open FET, and a 9.3 Ah discharge that ends at 3.50 V do not move it; a stroke that measures above nameplate stays at nameplate; usable capacity written below half nameplate is pulled back to half, and one nameplate discharged is still one cycle; charge-complete holds through an 8 A spike and clears below 3.50 V; an open charge FET ignores charge current and an open discharge FET ignores discharge current; a cell below 2.80 V holds the discharge cutoff until 2.90 V; balance that is already on stays on at 1.5 A and drops at 2.5 A; FETs stay open until the first tick; 100 ms over-voltage pulse ignored; a one-tick dip to 3.60 V does not erase that wait, and a release to 3.48 V starts it over; `clear_faults` cannot speed debounce; over-voltage opens charge only; under-voltage opens discharge only (spread kept under 400 mV so a spread trip does not hide that); 55 °C stops charge, −1 °C stops charge, −10 °C holds discharge at 20 A until −5 °C and does not snap SOC, −21 °C opens both; a recovered over-voltage at 47 °C may charge again, a recovered over-current at 55 °C may discharge again, a recovered under-voltage at −15 °C may discharge again; a real 50 °C charge cut still waits for 45 °C, and a real 60 °C pack cut still holds at 55 °C; missing NTC is over-temp, not 25 °C; 0.2 C at 3 °C on the 200 Ah pack is 40 A; a 47 °C cell beside a 3 °C cell does not request heat; charge-complete; at most four bleed resistors; a hot `clear_faults` sample turns bleed off without latching over-temp; spread holds at 201 mV and releases at 200 mV; an open wire does not bleed and does not wipe SOC; the wire stays open through 100 ms back in range and releases at 200 ms, while `clear_faults` releases it on that sample; coulomb 100 A × 36 s on 200 Ah → −0.5 %; remainder clamp at 0 % / 100 %; rest snap at 3.10 V after 30 s clears the remainder, none at 3.30 V; after that snap a 0.4 A load still moves SOC, and a later rest can snap again; one high cell holds CV at pack voltage; signed current round-trip; `NULL` pointers.
+Checks, among other things: 9.3 Ah from 3.10 V to 3.50 V on a 20 Ah pack moves usable capacity from 20.000 Ah to 17.500 Ah, and the return stroke continues to 15.625 Ah; a flat-band rest, a 1 Ah stroke, a 10 °C arrival, charge into an open FET, and a 9.3 Ah discharge that ends at 3.50 V do not move it; a stroke that measures above nameplate stays at nameplate; usable capacity written below half nameplate is pulled back to half, and one nameplate discharged is still one cycle; charge-complete holds through an 8 A spike and clears below 3.50 V; an open charge FET ignores charge current and an open discharge FET ignores discharge current; a cell below 2.80 V holds the discharge cutoff until 2.90 V; balance that is already on stays on at 1.5 A and drops at 2.5 A; FETs stay open until the first tick; 100 ms over-voltage pulse ignored; a one-tick dip to 3.60 V does not erase that wait, and a release to 3.48 V starts it over; `clear_faults` cannot speed debounce; over-voltage opens charge only; under-voltage opens discharge only (spread kept under 400 mV so a spread trip does not hide that); 55 °C stops charge, −1 °C stops charge, −10 °C holds discharge at 20 A until −5 °C and does not snap SOC, −21 °C opens both; 2 A through an open charge FET latches after 200 ms and opens discharge too, a 100 ms pulse does not, and one tick at 1 A does not erase that wait; a recovered over-voltage at 47 °C may charge again, a recovered over-current at 55 °C may discharge again, a recovered under-voltage at −15 °C may discharge again; a real 50 °C charge cut still waits for 45 °C, and a real 60 °C pack cut still holds at 55 °C; missing NTC is over-temp, not 25 °C; 0.2 C at 3 °C on the 200 Ah pack is 40 A; a 47 °C cell beside a 3 °C cell does not request heat; charge-complete; at most four bleed resistors; a hot `clear_faults` sample turns bleed off without latching over-temp; spread holds at 201 mV and releases at 200 mV; an open wire does not bleed and does not wipe SOC; the wire stays open through 100 ms back in range and releases at 200 ms, while `clear_faults` releases it on that sample; coulomb 100 A × 36 s on 200 Ah → −0.5 %; remainder clamp at 0 % / 100 %; rest snap at 3.10 V after 30 s clears the remainder, none at 3.30 V; after that snap a 0.4 A load still moves SOC, and a later rest can snap again; one high cell holds CV at pack voltage; signed current round-trip; `NULL` pointers.
 
 On an MCU, compile `src/bms.c` and `src/bms_regs.c` against your HAL.
 
@@ -249,7 +253,7 @@ On an MCU, compile `src/bms.c` and `src/bms_regs.c` against your HAL.
 - A customer dashboard or household EMS ([home-solar-ess](https://github.com/Lin-Chai49/home-solar-ess) is a separate simulator)
 - An SOH percentage, a thermal-runaway percentage, or an LLM
 - A drop-in `.hex` for a specific BMS PCB
-- Microsecond short-circuit protection, stuck-FET detection, precharge, or a CAN/Modbus stack
+- Microsecond short-circuit protection, a hardware desat detector, insulation monitoring, precharge, or a CAN/Modbus stack
 - A substitute for analog hardware protection (AFE comparators, fuse)
 
 This firmware opens MOSFETs and publishes limits on a 10 ms tick. The analog front-end and the fuse stay in the circuit.
