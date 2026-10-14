@@ -2,7 +2,7 @@
 
 [![check](https://github.com/Lin-Chai49/pack-bms/actions/workflows/check.yml/badge.svg)](https://github.com/Lin-Chai49/pack-bms/actions/workflows/check.yml)
 
-Firmware core for the MCU on a **16-series LFP pack**. Each tick it samples the cells, commands the charge and discharge MOSFETs, counts state of charge, and publishes a 48-word register image an inverter can read. Near the top of charge it bleeds at most four high cells for 1.0 s, then turns those resistors off for one tick so the next voltage sample is taken with the resistors open.
+Firmware core for the MCU on a **16-series LFP pack**. Each tick it samples the cells, commands the charge and discharge MOSFETs, counts state of charge, and publishes a 48-word register image an inverter can read. Near the top of charge it bleeds at most four high cells for 1.0 s, then turns those resistors off for 200 ms so the fault wait can finish on an unloaded sample.
 
 It is the pack controller, not a dashboard and not a `.hex` for a named board. You still write the analog-front-end driver, the MOSFET gate drive, and the fieldbus. The core is C99: no RTOS, no heap, no vendor HAL.
 
@@ -12,7 +12,7 @@ It is the pack controller, not a dashboard and not a `.hex` for a named board. Y
 | Call | `bms_tick()` every 10 ms |
 | Charge / discharge caps | 120 A / 150 A, about 6–7 kW on a 48 V bus |
 | Inverter CV / cutoff | 55.2 V / 44.8 V, then tapered as cells approach the ends |
-| Balance | At most four cells, and only near the top. On for 1.0 s, off for one tick, then choose again |
+| Balance | At most four cells, and only near the top. On for 1.0 s, off for 200 ms, then choose again |
 | Sizing | Macros in `include/bms.h`. The inverter does not change them |
 
 The household simulator is a separate repository: [home-solar-ess](https://github.com/Lin-Chai49/home-solar-ess).
@@ -45,7 +45,7 @@ Charge and discharge are separate MOSFETs. Opening one direction leaves the othe
 
    Sixteen cells in series.
    Balance mask bit i turns on the bleed resistor across cell i.
-   At most four cells. On for 1.0 s, then off for one 10 ms tick.
+   At most four cells. On for 1.0 s, then off for 200 ms.
 ```
 
 | Event | CHG | DSG |
@@ -88,7 +88,7 @@ Implement `include/bms_hal.h`. The core never talks to I²C or a gate driver.
 void bms_hal_sample(bms_sample_t *out);   /* cell mV, pack mA, up to 4 temps */
 void bms_hal_set_chg_mos(int on);
 void bms_hal_set_dsg_mos(int on);
-void bms_hal_set_balance(uint16_t mask);  /* bit i bleeds cell i */
+void bms_hal_set_balance(uint16_t mask);  /* bit i bleeds cell i. Zero for 200 ms after each 1.0 s */
 uint32_t bms_hal_millis(void);            /* unused by the core; your loop may use it */
 ```
 
@@ -110,7 +110,7 @@ for (;;) {
 
 `bms_init` commands both FETs open and balance off. They close on the first healthy tick. A full or hot pack does not conduct in the gap before that tick. Calling init again mid-run opens the FETs until the next tick. Current already flowing on that first sample is the load the FETs are about to connect. It is not treated as a welded FET.
 
-`bms_hal_set_balance` runs every tick. After each 1.0 s the mask is zero for one tick. Drive those resistors off before the next `bms_hal_sample`. If they stay on, the core treats the next voltages as unloaded and may choose cells from a sagged reading.
+`bms_hal_set_balance` runs every tick. After each 1.0 s the mask is zero for 200 ms. Drive those resistors off before the next `bms_hal_sample`. A sample taken while a resistor was still on does not pull that cell down: the core keeps the last reading taken with the resistor off. If the resistors stay on through the gap, the core treats those samples as unloaded.
 
 Compile `src/bms.c` and `src/bms_regs.c` with your HAL `.c`. Do not link `host/main_host.c` on the MCU. That file is a fake front end for the desktop test.
 
@@ -128,7 +128,7 @@ A fault bit waits 20 ticks (200 ms) inside its set region, then latches until th
 
 Open wire has no band between set and release. The bit stays until the wire has been in range for 200 ms, so one good sample cannot close the FETs.
 
-`bms_clear_faults()` samples again and drops bits that are already past release, including an open wire that is in range on that sample. It does not set new faults, and it does not advance debounce, so a tight loop cannot trip over-voltage faster than 200 ms. It also leaves a temperature hold that is still inside its band. It does refresh balance. A hot sample or an open wire turns the resistors off on that call. While a balance window is still running and the top of the pack still qualifies, the mask already commanded is kept. That call does not add a cell.
+`bms_clear_faults()` samples again and drops bits that are already past release, including an open wire that is in range on that sample. It does not set new faults, and it does not advance debounce, so a tight loop cannot trip over-voltage faster than 200 ms. It also leaves a temperature hold that is still inside its band. It does refresh balance. A hot sample or an open wire turns the resistors off on that call. While a balance window is still running and the top of the pack still qualifies, the mask already commanded is kept. That call does not add a cell. A bleeding cell's low reading does not clear a voltage fault: the same open-resistor floor used by `bms_tick()` applies here.
 
 Spread releases at 200 mV inclusive. 201 mV stays latched. 200 mV clears.
 
@@ -189,9 +189,9 @@ Discharge current (`allow_dsg_a`) starts at 150 A, with the same “one voltage 
 
 The −10 °C discharge hold is a current cap. It does not open the discharge FET. The FET still opens at −20 °C and closes at −10 °C, and that close comes back at 20 A. It returns to 40 A only at −5.0 °C. A cell at −9 °C with the hold clear is still on the 40 A row.
 
-**Charge voltage** (`max_chg_v_x10`) is **55.2 V** (16 × 3.45 V). If one cell is already above 3.45 V, the limit becomes the present pack voltage when that is lower, so the inverter holds instead of pushing the high cell further.
+**Charge voltage** (`max_chg_v_x10`) is **55.2 V** (16 × 3.45 V). If one cell is already above 3.45 V, the limit becomes the present pack voltage when that is lower, so the inverter holds instead of pushing the high cell further. A bleeding cell that reads low does not lift this limit, or the charge-current cap. Both follow the last reading taken with that resistor off.
 
-**Discharge cutoff** (`min_dsg_v_x10`) is **44.8 V** (16 × 2.80 V). If the lowest cell sags below 2.80 V, the cutoff rises to the present pack voltage and stays there until that cell is back to 2.90 V. A cell that is under 2.90 V but never went through 2.80 V does not raise it. A rebound of a few tens of millivolts does not invite the inverter back into the same cell.
+**Discharge cutoff** (`min_dsg_v_x10`) is **44.8 V** (16 × 2.80 V). If the lowest cell sags below 2.80 V, the cutoff rises to the present pack voltage and stays there until that cell is back to 2.90 V. Bleed sag on a high cell does not count as that low cell. A cell that is under 2.90 V but never went through 2.80 V does not raise it. A rebound of a few tens of millivolts does not invite the inverter back into the same cell.
 
 **Charge complete** requires the highest cell at or above 3.50 V, SOC at or above 95 %, and current under 3 A. Once entered, it stays until the highest cell drops below 3.50 V or SOC drops below 95 %. A later spike above 3 A does not turn charge back on. The charge FET stays closed. `allow_chg_a` is 0.
 
@@ -225,7 +225,7 @@ After 30 s with `|I| < 0.5 A`, SOC is snapped once from the **lowest** cell, and
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | SOC | 0 % | 2 % | 5 % | 10 % | 20 % | 40 % | 60 % | 80 % | 90 % | 95 % | 98 % | 100 % |
 
-The snap is skipped while any sense wire is open (under 0.50 V or over 4.80 V). A disconnected wire is not an empty cell and must not wipe the coulomb count. If the wire is still open at 30 s, a later in-range sample during that same rest may snap. When a snap does run, the remainder is cleared, so a leftover just under 0.1 % cannot undo it. Further current under 0.5 A still counts. Another snap needs current above 0.5 A, then another 30 s of rest. In the flat band the remainder is left alone. If the lowest cell later leaves that band during the same rest, the snap runs then.
+The snap is skipped while any sense wire is open (under 0.50 V or over 4.80 V). A disconnected wire is not an empty cell and must not wipe the coulomb count. A cell that is bleeding does not become the lowest cell by sagging. The snap uses the same open-resistor floor as the charge limit. If the wire is still open at 30 s, a later in-range sample during that same rest may snap. When a snap does run, the remainder is cleared, so a leftover just under 0.1 % cannot undo it. Further current under 0.5 A still counts. Another snap needs current above 0.5 A, then another 30 s of rest. In the flat band the remainder is left alone. If the lowest cell later leaves that band during the same rest, the snap runs then.
 
 ### Usable capacity
 
@@ -249,16 +249,16 @@ Passive balance runs only near the top of charge. Charge current does not block 
 |---|---|
 | Start | Discharge under 1 A, highest cell ≥ 3.40 V, spread ≥ 25 mV. At most four cells, the highest ones |
 | On | That same mask for 1.0 s. Discharge may rise to just under 2 A without dropping the resistors |
-| Gap | One tick with every resistor off. The next tick reads the cells unloaded and may choose a new set |
-| Stop on this tick | Highest cell &lt; 3.40 V, spread &lt; 25 mV, discharge ≥ 2 A, hottest cell ≥ 50 °C, or an open sense wire |
+| Gap | Resistors off for 200 ms. The last of those unloaded samples may choose a new set |
+| Stop on this tick | Discharge ≥ 2 A, hottest cell ≥ 50 °C, or an open sense wire. On an unloaded sample, also a highest cell &lt; 3.40 V or a spread &lt; 25 mV |
 
-Bleed current sags the cell under the resistor. A sample taken while the mask is on does not add a cell and does not drop one, as long as the pack still meets the voltage rules above. The set chosen on the unloaded tick is the set held for the next 1.0 s.
+Bleed current sags the cell under the resistor. A sample taken while that resistor is on does not add a cell and does not drop one. It also does not pull that cell's voltage down. The core keeps the last reading taken with the resistor off and uses it for the charge cap, the charge voltage, the discharge cutoff, the published cell voltage, and for releasing a voltage fault. A higher reading still counts. Below 0.50 V or above 4.80 V is an open wire and still counts. Over-voltage can still trip when the raw reading is already at 3.65 V. Under-voltage does not start from a cell that was bleeding. Spread trips only when the raw spread and this held spread are both at 400 mV. The mask then stays off for 200 ms, which is the fault wait, and the last of those samples chooses the next set.
 
-A session that was only paused for that measurement stays in the 2 A band, so 1.5 A continues after the gap. A stop at 2 A or more, or a stop because the top of the pack left the band, does not start again until discharge is under 1 A.
+A session that was only paused for that measurement stays in the 2 A band, so 1.5 A continues after the 200 ms. A stop at 2 A or more, or a stop because an unloaded sample shows the top of the pack has left the band, does not start again until discharge is under 1 A.
 
 Balance is off at or above 50 °C, because the bleed resistors heat the cells, and off while a sense wire is open. An open wire would otherwise look like the lowest cell, and every cell near the top would bleed. A 25 mV spread below 3.40 V is ignored on purpose.
 
-The open controllers for Tesla Model S module boards stop balance before they read cell voltage, and they put a timeout on the bleed command so a silent master cannot leave the resistors on. This 1.0 s window is that idea for an LFP pack. The core does not use their cell voltages, precharge contactor, module bus, or the setting that ignores a dead thermistor. A missing thermistor is still over-temperature.
+The open controllers for Tesla Model S module boards stop balance before they read cell voltage, and they put a timeout on the bleed command so a silent master cannot leave the resistors on. This 1.0 s on window, followed by 200 ms off, is that idea for an LFP pack. The core does not use their cell voltages, precharge contactor, module bus, or the setting that ignores a dead thermistor. A missing thermistor is still over-temperature.
 
 ---
 
@@ -280,14 +280,14 @@ Sixteen-bit holding registers. Addresses 24–31 are unused and read as 0. Cells
 | 11–12 | v_max / v_min | mV. A negative voltage is published as 0 |
 | 13–14 | high / low cell | 1..16 |
 | 15–16 | allow charge / discharge | amperes. 0 = do not use that direction |
-| 17 | balance mask | bit i = cell i bleeding this tick. Zero for the one tick after each 1.0 s |
+| 17 | balance mask | bit i = cell i bleeding this tick. Zero for 200 ms after each 1.0 s |
 | 18 | warn | bit0 OV, 1 UV, 2 OT, 3 UT, 4 OCC, 5 OCD, 6 spread, 7 low SOC, 8 high SOC |
 | 19 | flags | bit0 charge-complete, 1 empty, 2 heater requested |
 | 20 | cycles | nameplate discharges, RAM only |
 | 21 | remain_ah_x10 | usable Ah × SOC. 1000 = 100.0 Ah |
 | 22 | max_chg_v_x10 | inverter CV, 0.1 V |
 | 23 | min_dsg_v_x10 | inverter cutoff, 0.1 V |
-| 32–47 | cell mV | cell 1..16 |
+| 32–47 | cell mV | cell 1..16. A bleeding cell does not fall below its last open-resistor reading, unless the wire is open |
 
 Rebuild current on any MCU, including a 16-bit `int`:
 
@@ -322,7 +322,7 @@ The suite locks the behavior above, including:
 
 - **Capacity.** 9.3 Ah from 3.10 V to 3.50 V on a 20 Ah pack moves usable capacity from 20.000 Ah to 17.500 Ah, then the return stroke to 15.625 Ah. A flat-band rest, a 1 Ah stroke, a 10 °C arrival, charge into an open FET, and a 9.3 Ah discharge that ends at 3.50 V do not move it. A stroke above nameplate stays at nameplate. A saved value below half nameplate is pulled back to half. One nameplate discharged is still one cycle.
 - **Charge complete and SOC.** An 8 A spike does not clear charge-complete. It clears below 3.50 V. An open charge FET ignores charge current, and an open discharge FET ignores discharge current. 100 A for 36 s on 200 Ah moves SOC by −0.5 %. The remainder clamps at 0 % and 100 %.
-- **Cutoff and balance.** A cell below 2.80 V holds the discharge cutoff until 2.90 V. Balance that is already on stays on at 1.5 A and drops at 2.5 A. It bleeds for 1.0 s, turns off for one tick, and can resume on the next tick, including at 1.5 A. A cell that rises while the resistors are on is not added until that off tick. At most four bleed resistors. One high cell holds CV at the present pack voltage.
+- **Cutoff and balance.** A cell below 2.80 V holds the discharge cutoff until 2.90 V. Balance that is already on stays on at 1.5 A and drops at 2.5 A. It bleeds for 1.0 s, turns off for 200 ms, and can resume on the last of those samples, including at 1.5 A. A cell that rises while the resistors are on is not added until that last sample. A sag to 3.44 V does not raise the 5 A charge cap, does not release the charge-voltage hold, and is not the voltage the cell register shows. A latched over-voltage survives that sag, including through `clear_faults`, and releases on the next unloaded sample. An over-voltage hidden in the 3.60 V band latches at the end of the 200 ms window. A bled cell sagging to 3.30 V does not clear a spread fault, and an open wire on that cell still does. At most four bleed resistors. One high cell holds CV at the present pack voltage.
 - **Debounce.** FETs stay open until the first tick. A 100 ms over-voltage pulse is ignored. One tick at 3.60 V does not erase that wait, and a release to 3.48 V starts it over. `clear_faults` cannot speed debounce. Over-voltage opens charge only. Under-voltage opens discharge only, with spread kept under 400 mV so a spread trip cannot hide that.
 - **Temperature.** 55 °C stops charge. −1 °C stops charge. −10 °C holds discharge at 20 A until −5 °C and does not snap SOC. −21 °C opens both FETs. A recovered over-voltage at 47 °C may charge again. A recovered over-current at 55 °C may discharge again. A recovered under-voltage at −15 °C may discharge again. A real 50 °C charge cut still waits for 45 °C, and a real 60 °C pack cut still holds at 55 °C. A missing thermistor is over-temperature. 0.2 C at 3 °C on the 200 Ah pack is 40 A. A 47 °C cell beside a 3 °C cell does not request heat. A hot `clear_faults` sample turns bleed off without latching over-temperature.
 - **Open wire and open FET.** Spread holds at 201 mV and releases at 200 mV. An open wire does not bleed and does not wipe SOC. It stays open through 100 ms back in range and releases at 200 ms. `clear_faults` releases an in-range wire on that sample. Two amps through an open charge FET latches after 200 ms and opens discharge too. A 100 ms pulse does not, and one tick at 1 A does not erase that wait. Fifteen amps left after over-current releases keeps that FET open and then latches the leak fault. Current present on the first tick does not.

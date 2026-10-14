@@ -71,9 +71,10 @@ int main(void)
     expect("cv 55.2 V", b.max_chg_v_x10 == 552);
     expect("cutoff 44.8 V", b.min_dsg_v_x10 == 448);
 
-    /* 100 ms OV pulse must not latch (200 ms debounce). */
-    set_cells(3450);
-    g_s.cell_mv[6] = 3700;
+    /* 100 ms OV pulse must not latch (200 ms debounce).
+       Every cell is high, so spread stays 0 and balance stays off.
+       A single high cell would bleed, and that sag floor is a different test. */
+    set_cells(3700);
     g_s.pack_ma = -20000;
     ticks(&b, 10);
     expect("OV pulse ignored", !(b.fault & BMS_FLT_OV));
@@ -95,7 +96,7 @@ int main(void)
     g_s.pack_ma = 0;
 
     /* Hysteresis: 3.60 V is below set, above release — stay latched. */
-    g_s.cell_mv[6] = 3600;
+    set_cells(3600);
     ticks(&b, 25);
     expect("OV holds in hysteresis", b.fault & BMS_FLT_OV);
     expect("chg still off in hyst", g_chg == 0);
@@ -105,50 +106,48 @@ int main(void)
     expect("clear refused while OV", b.fault & BMS_FLT_OV);
 
     /* Analog recovered: clear_faults re-samples and must close the FET without a tick. */
-    g_s.cell_mv[6] = 3480;
+    set_cells(3480);
     bms_clear_faults(&b);
     expect("OV released", !(b.fault & BMS_FLT_OV));
     expect("charge mos on again", g_chg == 1);
 
     /* Long hold used to wrap the debounce counter and delay recovery by seconds. */
-    set_cells(3450);
-    g_s.cell_mv[6] = 3700;
+    set_cells(3700);
     g_s.pack_ma = 0;
     ticks(&b, 100);
     expect("OV still latched after 1s", b.fault & BMS_FLT_OV);
-    g_s.cell_mv[6] = 3480;
+    set_cells(3480);
     ticks(&b, 5);
     expect("OV released after long hold", !(b.fault & BMS_FLT_OV));
 
     /* A dip into the release region starts the 200 ms wait over.
        A dip that only reaches the hysteresis band must not. */
     idle_pack();
-    set_cells(3450);
-    g_s.cell_mv[6] = 3700; /* spread 250 mV, under the 400 mV trip */
+    set_cells(3700);
     g_s.pack_ma = -5000;
     ticks(&b, 2);
     expect("baseline no OV", !(b.fault & BMS_FLT_OV) && g_chg == 1);
     ticks(&b, 8);
     expect("100 ms OV does not latch", !(b.fault & BMS_FLT_OV));
-    g_s.cell_mv[6] = 3480;
+    set_cells(3480);
     ticks(&b, 1);
-    g_s.cell_mv[6] = 3700;
+    set_cells(3700);
     ticks(&b, 10);
     expect("recovered OV wait starts over", !(b.fault & BMS_FLT_OV));
     expect("chg on after recovered wait", g_chg == 1);
     ticks(&b, 9); /* 19 ticks in the set region so far on this wait */
     expect("OV wait not done at 190 ms", !(b.fault & BMS_FLT_OV));
-    g_s.cell_mv[6] = 3600; /* 3.60 V: not set, not release */
+    set_cells(3600); /* 3.60 V: not set, not release */
     ticks(&b, 1);
     expect("hysteresis dip keeps the wait", !(b.fault & BMS_FLT_OV));
     expect("chg on through the dip", g_chg == 1);
-    g_s.cell_mv[6] = 3700;
+    set_cells(3700);
     ticks(&b, 1);
     expect("OV still waiting after one tick back", !(b.fault & BMS_FLT_OV));
     ticks(&b, 1);
     expect("OV latches once the wait finishes", b.fault & BMS_FLT_OV);
     expect("chg off when that OV latches", g_chg == 0);
-    g_s.cell_mv[6] = 3480;
+    set_cells(3480);
     g_s.pack_ma = 0;
     ticks(&b, 2);
 
@@ -193,8 +192,7 @@ int main(void)
     /* Current through a commanded-open FET. 100 ms must not latch.
        A one-tick dip into 0.5–2 A sheds the wait. 200 ms opens the other FET. */
     idle_pack();
-    set_cells(3450);
-    g_s.cell_mv[6] = 3700; /* spread 250 mV */
+    set_cells(3700);
     g_s.pack_ma = 0;
     ticks(&b, 25);
     expect("leak baseline OV", (b.fault & BMS_FLT_OV) && g_chg == 0 && g_dsg == 1);
@@ -339,12 +337,20 @@ int main(void)
     ticks(&b, 5);
     expect("47C chg on", g_chg == 1 && g_dsg == 1);
     expect("47C allow chg 20A", b.allow_chg_a == 20);
-    g_s.cell_mv[6] = 3700; /* spread 220 mV, under the 400 mV trip */
+    /* Uniform 3.70 V keeps spread at 0, so balance does not hold the old
+       cell reading across this recovery. set_cells() would also reset 47 C. */
+    {
+        int i;
+        for (i = 0; i < BMS_N_CELL; i++) g_s.cell_mv[i] = 3700;
+    }
     ticks(&b, 25);
     expect("47C OV latches", b.fault & BMS_FLT_OV);
     expect("47C chg off on OV", g_chg == 0);
     expect("47C dsg stays on", g_dsg == 1);
-    g_s.cell_mv[6] = 3480;
+    {
+        int i;
+        for (i = 0; i < BMS_N_CELL; i++) g_s.cell_mv[i] = 3480;
+    }
     ticks(&b, 5);
     expect("47C OV clear", !(b.fault & BMS_FLT_OV));
     expect("47C chg back after OV", g_chg == 1);
@@ -481,10 +487,13 @@ int main(void)
     expect("balance mask on high cell", g_bal & 1u);
     expect("cell 7 not bleeding if low", (g_bal & (1u << 6)) == 0 || g_s.cell_mv[6] >= 3450 + 25);
 
-    /* Mid-band: no balance at 25 mV (LFP flat, we require >= 3.40 V) */
+    /* Mid-band: no balance at 25 mV (LFP flat, we require >= 3.40 V).
+       2.5 A ends the bleed above, so this sample is not held at 3.52 V. */
+    g_s.pack_ma = 2500;
+    ticks(&b, 1);
     idle_pack();
     g_s.cell_mv[0] = 3330;
-    ticks(&b, 5);
+    ticks(&b, 2);
     expect("no balance in mid band", g_bal == 0);
 
     /* Near top: inverter current limit tapers before the OV trip. */
@@ -538,9 +547,9 @@ int main(void)
     ticks(&b, 3);
     expect("balance restarts at rest", g_bal != 0);
 
-    /* Resistors sag the cell they measure. Bleed for 1.0 s, then one tick
-       off, and only the following sample may add a cell. The 1.5 A session
-       continues across that gap; 2.5 A still ends it. */
+    /* Resistors sag the cell they measure. Bleed for 1.0 s, then stay off
+       for the 200 ms fault wait. Only the last of those samples may add a
+       cell. The 1.5 A session continues across that gap; 2.5 A still ends it. */
     g_s.pack_ma = 2500;
     ticks(&b, 1);
     expect("balance off before the window", g_bal == 0);
@@ -556,19 +565,101 @@ int main(void)
     ticks(&b, 98);
     expect("balance still on the original cell at 1 s", g_bal == 1u);
     ticks(&b, 1);
-    expect("balance off for the unloaded sample", g_bal == 0);
+    expect("balance off to measure", g_bal == 0);
+    ticks(&b, 19);
+    expect("balance stays off through the measurement", g_bal == 0);
     ticks(&b, 1);
-    expect("unloaded sample recruits the higher cell", (g_bal & 3u) == 3u);
+    expect("last clean sample recruits the higher cell", (g_bal & 3u) == 3u);
     g_s.pack_ma = 1500;
     ticks(&b, 99);
     expect("balance holds the rest of the window at 1.5 A", g_bal != 0);
     ticks(&b, 1);
     expect("balance gaps at 1.5 A", g_bal == 0);
+    ticks(&b, 19);
+    expect("balance still measuring at 1.5 A", g_bal == 0);
     ticks(&b, 1);
     expect("balance resumes at 1.5 A after the gap", g_bal != 0);
     g_s.pack_ma = 2500;
     ticks(&b, 1);
     expect("balance ends at 2.5 A during a window", g_bal == 0);
+
+    /* The resistor pulls the cell down. Charge limits, the published
+       voltage, and a latched voltage fault stay on the last open reading. */
+    bms_init(&b, 200000, 500);
+    idle_pack();
+    ticks(&b, 2);
+    set_cells(3400);
+    g_s.cell_mv[0] = 3600;
+    g_s.pack_ma = 0;
+    ticks(&b, 1);
+    expect("bleed starts at 3.60 V", g_bal == 1u);
+    expect("3.60 V cap is 5 A", b.allow_chg_a == 5);
+    expect("3.60 V holds cv", b.max_chg_v_x10 == 546);
+    g_s.cell_mv[0] = 3440;
+    ticks(&b, 40);
+    expect("sag does not raise the charge cap", b.allow_chg_a == 5);
+    expect("sag does not release cv", b.max_chg_v_x10 == 546);
+    expect("sag is not published", b.cell_mv[0] == 3600);
+    expect("sag does not trip ov", !(b.fault & BMS_FLT_OV));
+    expect("balance still on through the sag", g_bal == 1u);
+    g_s.cell_mv[0] = 2700;
+    ticks(&b, 5);
+    expect("bled sag does not raise cutoff", b.min_dsg_v_x10 == 448);
+
+    bms_init(&b, 200000, 500);
+    idle_pack();
+    ticks(&b, 2);
+    set_cells(3450);
+    g_s.cell_mv[0] = 3700;
+    g_s.pack_ma = 0;
+    ticks(&b, 25);
+    expect("ov latches while bleeding", (b.fault & BMS_FLT_OV) && g_bal != 0);
+    g_s.cell_mv[0] = 3400;
+    ticks(&b, 30);
+    expect("sag does not clear ov", (b.fault & BMS_FLT_OV) && g_chg == 0);
+    bms_clear_faults(&b);
+    expect("clear_faults ignores a bled sag", (b.fault & BMS_FLT_OV) && g_chg == 0);
+    g_s.pack_ma = 2500;
+    ticks(&b, 1);
+    g_s.pack_ma = 0;
+    g_s.cell_mv[0] = 3480;
+    ticks(&b, 1);
+    expect("unloaded 3.48 V clears ov", !(b.fault & BMS_FLT_OV) && g_chg == 1);
+
+    /* Sag hides 3.66 V inside the 3.60 V band. The on-window must not trip,
+       and the 200 ms with the resistors off must. */
+    bms_init(&b, 200000, 500);
+    idle_pack();
+    ticks(&b, 2);
+    set_cells(3450);
+    g_s.cell_mv[0] = 3660;
+    g_s.pack_ma = 0;
+    ticks(&b, 1);
+    g_s.cell_mv[0] = 3600;
+    ticks(&b, 99);
+    expect("hidden ov still open", !(b.fault & BMS_FLT_OV) && g_chg == 1);
+    ticks(&b, 1);
+    expect("measure starts with ov clear", g_bal == 0 && !(b.fault & BMS_FLT_OV));
+    g_s.cell_mv[0] = 3660;
+    ticks(&b, 19);
+    expect("ov not latched before the full clean window", !(b.fault & BMS_FLT_OV));
+    ticks(&b, 1);
+    expect("clean window latches ov", (b.fault & BMS_FLT_OV) && g_chg == 0);
+
+    bms_init(&b, 200000, 500);
+    idle_pack();
+    ticks(&b, 2);
+    g_s.cell_mv[0] = 3600;
+    g_s.cell_mv[1] = 3100;
+    g_s.pack_ma = 0;
+    ticks(&b, 25);
+    expect("diff latches while bleeding", (b.fault & BMS_FLT_DIFF) && g_bal != 0);
+    g_s.cell_mv[0] = 3300;
+    ticks(&b, 10);
+    expect("bled sag does not clear diff", b.fault & BMS_FLT_DIFF);
+    g_s.cell_mv[0] = 0;
+    ticks(&b, 25);
+    expect("open wire on a bled cell", b.fault & BMS_FLT_OW);
 
     /* clear_faults re-samples. Bleed must follow that sample, and a hot
        sample opens the FETs without latching a fault bit by itself. */
@@ -660,15 +751,14 @@ int main(void)
     bms_init(&b, 200000, 500);
     idle_pack();
     ticks(&b, 2);
-    set_cells(3450);
-    g_s.cell_mv[6] = 3700; /* spread 250 mV, under the 400 mV trip */
+    set_cells(3700);
     g_s.pack_ma = 0;
     ticks(&b, 25);
     expect("OV open for soc gate", (b.fault & BMS_FLT_OV) && g_chg == 0 && g_dsg == 1);
     g_s.pack_ma = -100000;
     ticks(&b, 3600);
     expect("open chg fet ignores charge current", b.soc_x10 == 500);
-    g_s.cell_mv[6] = 3450;
+    set_cells(3450);
     g_s.pack_ma = 0;
     ticks(&b, 5);
     expect("OV clear for soc gate", !(b.fault & BMS_FLT_OV) && g_chg == 1);
@@ -835,8 +925,7 @@ int main(void)
     set_cells(3100);
     g_s.pack_ma = 0;
     ticks(&b, 3000);
-    set_cells(3450);
-    g_s.cell_mv[6] = 3700;
+    set_cells(3700);
     g_s.pack_ma = 0;
     ticks(&b, 25);
     expect("OV open during fade", (b.fault & BMS_FLT_OV) && g_chg == 0);
@@ -865,6 +954,10 @@ int main(void)
     ticks(&b, 5);
     expect("cv hold one high cell", b.max_chg_v_x10 == 531);
 
+    /* That 3.60 V cell is bleeding. End it before the cutoff numbers,
+       or the sag floor would keep it at 3.60 V. */
+    g_s.pack_ma = 2500;
+    ticks(&b, 1);
     /* One low cell: cutoff rises to pack voltage and stays through 2.85 V. */
     idle_pack();
     set_cells(3000);

@@ -96,6 +96,49 @@ static int open_wire(const bms_t *b)
     return 0;
 }
 
+static void live_span(const bms_sample_t *s, int16_t *vmax, int16_t *vmin)
+{
+    int i;
+    *vmax = s->cell_mv[0];
+    *vmin = s->cell_mv[0];
+    for (i = 1; i < BMS_N_CELL; i++) {
+        if (s->cell_mv[i] > *vmax) *vmax = s->cell_mv[i];
+        if (s->cell_mv[i] < *vmin) *vmin = s->cell_mv[i];
+    }
+}
+
+/* A cell in the mask was read with its bleed resistor on. A lower in-range
+   reading is the resistor, not the cell. An open wire still passes through,
+   and a higher reading still counts. Unloaded samples replace the floor. */
+static void bleed_floor(bms_t *b, const bms_sample_t *raw, bms_sample_t *adj)
+{
+    int i;
+    *adj = *raw;
+    if (b->bal_mask == 0) {
+        for (i = 0; i < BMS_N_CELL; i++)
+            b->cell_off_mv[i] = raw->cell_mv[i];
+        return;
+    }
+    for (i = 0; i < BMS_N_CELL; i++) {
+        int16_t live = raw->cell_mv[i];
+        if ((b->bal_mask & (uint16_t)(1u << i)) == 0) continue;
+        if (live < BMS_OW_LO_MV || live > BMS_OW_HI_MV) continue;
+        if (live < b->cell_off_mv[i]) adj->cell_mv[i] = b->cell_off_mv[i];
+    }
+}
+
+/* Under-voltage from cells that were not bleeding on this sample. The
+   resistor pulls the reading down, so a bleeding cell cannot start the trip. */
+static int uv_set(const bms_sample_t *raw, uint16_t mask)
+{
+    int i;
+    for (i = 0; i < BMS_N_CELL; i++) {
+        if (mask & (uint16_t)(1u << i)) continue;
+        if (raw->cell_mv[i] <= BMS_CELL_UV_MV) return 1;
+    }
+    return 0;
+}
+
 /* 2 A or more in a direction whose FET is commanded open. Milliamp earth
    leakage is below this shunt. A 0.5–2 A band sheds the wait instead of
    erasing it. Status is 0 until the first command; that gap is not a weld. */
@@ -114,19 +157,28 @@ static int leak_rel(const bms_t *b)
     return chg_ok && dsg_ok;
 }
 
-static void protect(bms_t *b)
+static void protect(bms_t *b, const bms_sample_t *raw)
 {
     uint16_t f = b->fault;
-    int32_t dv = (int32_t)b->v_max_mv - (int32_t)b->v_min_mv;
+    int16_t lvmax, lvmin;
+    int32_t live_dv, adj_dv;
     int ow = open_wire(b);
 
-    trip_rel(&b->db_ov, b->v_max_mv >= BMS_CELL_OV_MV, b->v_max_mv <= BMS_CELL_OV_REL_MV, &f, BMS_FLT_OV);
-    trip_rel(&b->db_uv, b->v_min_mv <= BMS_CELL_UV_MV, b->v_min_mv >= BMS_CELL_UV_REL_MV, &f, BMS_FLT_UV);
+    /* Set from the raw sample, so a resistor that did not pull the cell
+       below the trip still counts. Release from the sag floor, so the
+       resistor cannot drop a latched voltage fault. */
+    live_span(raw, &lvmax, &lvmin);
+    live_dv = (int32_t)lvmax - (int32_t)lvmin;
+    adj_dv = (int32_t)b->v_max_mv - (int32_t)b->v_min_mv;
+
+    trip_rel(&b->db_ov, lvmax >= BMS_CELL_OV_MV, b->v_max_mv <= BMS_CELL_OV_REL_MV, &f, BMS_FLT_OV);
+    trip_rel(&b->db_uv, uv_set(raw, b->bal_mask), b->v_min_mv >= BMS_CELL_UV_REL_MV, &f, BMS_FLT_UV);
     trip_rel(&b->db_occ, b->pack_ma <= -BMS_OCC_MA, b->pack_ma > -BMS_OC_REL_MA, &f, BMS_FLT_OCC);
     trip_rel(&b->db_ocd, b->pack_ma >= BMS_OCD_MA, b->pack_ma < BMS_OC_REL_MA, &f, BMS_FLT_OCD);
     trip_rel(&b->db_ot, b->t_max_dC >= BMS_OT_DC, b->t_max_dC <= BMS_OT_REL_DC, &f, BMS_FLT_OT);
     trip_rel(&b->db_ut, b->t_min_dC <= BMS_UT_DC, b->t_min_dC >= BMS_UT_REL_DC, &f, BMS_FLT_UT);
-    trip_rel(&b->db_diff, dv >= BMS_DIFF_MV, dv <= BMS_DIFF_REL_MV, &f, BMS_FLT_DIFF);
+    trip_rel(&b->db_diff, live_dv >= BMS_DIFF_MV && adj_dv >= BMS_DIFF_MV,
+             adj_dv <= BMS_DIFF_REL_MV, &f, BMS_FLT_DIFF);
     trip_rel(&b->db_leak, leak_set(b), leak_rel(b), &f, BMS_FLT_LEAK);
     /* Open wire has no band between set and release. Count the bad samples
        up and the good ones back down, and only drop the bit at zero, so one
@@ -409,21 +461,42 @@ static int wants_bal(const bms_sample_t *s, const bms_t *b, int i)
         && (int32_t)s->cell_mv[i] >= (int32_t)b->v_min_mv + BMS_BAL_DV_MV;
 }
 
+static uint16_t pick_balance(const bms_sample_t *s, const bms_t *b)
+{
+    uint16_t mask = 0;
+    int k;
+    for (k = 0; k < BMS_BAL_MAX; k++) {
+        int best = -1, i;
+        int16_t bestv = INT16_MIN;
+        for (i = 0; i < BMS_N_CELL; i++) {
+            if (mask & (uint16_t)(1u << i)) continue;
+            if (!wants_bal(s, b, i)) continue;
+            if (s->cell_mv[i] > bestv) {
+                bestv = s->cell_mv[i];
+                best = i;
+            }
+        }
+        if (best < 0) break;
+        mask |= (uint16_t)(1u << best);
+    }
+    return mask;
+}
+
 static void balance(bms_t *b, const bms_sample_t *s)
 {
     uint16_t mask = 0;
     int32_t spread = (int32_t)b->v_max_mv - (int32_t)b->v_min_mv;
-    /* Start under 1 A of discharge. A session already on, including the one
-       tick the resistors are forced off, stays while current is under 2 A. */
-    int session = (b->status & BMS_ST_BAL) || b->bal_gap;
+    /* Start under 1 A of discharge. A session already on, including the
+       unloaded measurement, stays while current is under 2 A. */
+    int session = (b->status & BMS_ST_BAL) || b->bal_gap != 0;
     int current_ok = session ? (b->pack_ma < 2000) : (b->pack_ma < 1000);
     int top_ok = spread >= BMS_BAL_DV_MV && b->v_max_mv >= BMS_BAL_MIN_MV;
-    int k;
 
     /* Bleed resistors dump heat into the pack — stop if already warm.
        An open wire makes vmin look like 0 V, so every real cell would "win".
-       A sample taken with the resistors on reads low. Do not recruit from it.
-       Hold the mask for 1.0 s, then force one off tick and decide again. */
+       Hold one mask for 1.0 s. Then leave every resistor off for the fault
+       wait. protect() has already seen this sample, so the last of those
+       ticks may choose the next mask. */
     if (!current_ok || open_wire(b) || b->t_max_dC >= BMS_CHG_OT_DC) {
         b->bal_left = 0;
         b->bal_gap = 0;
@@ -431,30 +504,23 @@ static void balance(bms_t *b, const bms_sample_t *s)
         if (b->bal_left > 1 && top_ok) {
             b->bal_left--;
             mask = b->bal_mask;
-            b->bal_gap = 0;
         } else {
             /* Window done, or the top fell out of range. A still-valid top
                is only a measurement gap, so the 2 A hold continues. */
             b->bal_left = 0;
-            b->bal_gap = top_ok ? 1 : 0;
+            b->bal_gap = top_ok ? (uint8_t)BMS_BAL_OFF_TICKS : 0;
+        }
+    } else if (b->bal_gap > 0) {
+        b->bal_gap--;
+        if (b->bal_gap == 0 && top_ok) {
+            mask = pick_balance(s, b);
+            b->bal_left = mask ? (uint8_t)BMS_BAL_ON_TICKS : 0;
+        } else if (!top_ok) {
+            b->bal_gap = 0;
         }
     } else if (top_ok) {
-        for (k = 0; k < BMS_BAL_MAX; k++) {
-            int best = -1, i;
-            int16_t bestv = INT16_MIN;
-            for (i = 0; i < BMS_N_CELL; i++) {
-                if (mask & (uint16_t)(1u << i)) continue;
-                if (!wants_bal(s, b, i)) continue;
-                if (s->cell_mv[i] > bestv) {
-                    bestv = s->cell_mv[i];
-                    best = i;
-                }
-            }
-            if (best < 0) break;
-            mask |= (uint16_t)(1u << best);
-        }
+        mask = pick_balance(s, b);
         b->bal_left = mask ? (uint8_t)BMS_BAL_ON_TICKS : 0;
-        b->bal_gap = 0;
     } else {
         b->bal_left = 0;
         b->bal_gap = 0;
@@ -519,30 +585,34 @@ void bms_init(bms_t *b, uint32_t cap_mah, uint16_t soc_x10)
 
 void bms_tick(bms_t *b)
 {
-    bms_sample_t s;
+    bms_sample_t raw, adj;
     if (!b) return;
-    bms_hal_sample(&s);
-    pack_stats(b, &s);
-    protect(b);
+    bms_hal_sample(&raw);
+    bleed_floor(b, &raw, &adj);
+    pack_stats(b, &adj);
+    protect(b, &raw);
     mosfets(b);
     soc_step(b);
     soc_rest(b);
-    balance(b, &s);
+    balance(b, &adj);
     publish(b);
     mode_of(b);
 }
 
 void bms_clear_faults(bms_t *b)
 {
-    bms_sample_t s;
+    bms_sample_t raw, adj;
     uint16_t f;
     int32_t dv;
     int ow;
     if (!b) return;
     /* Re-sample and drop bits that are past release. Do not advance debounce
-       — calling this in a tight loop must not trip OV in microseconds. */
-    bms_hal_sample(&s);
-    pack_stats(b, &s);
+       — calling this in a tight loop must not trip OV in microseconds.
+       The sag floor still applies, so a bleeding cell's low reading cannot
+       clear a voltage fault. */
+    bms_hal_sample(&raw);
+    bleed_floor(b, &raw, &adj);
+    pack_stats(b, &adj);
     f = b->fault;
     dv = (int32_t)b->v_max_mv - (int32_t)b->v_min_mv;
     ow = open_wire(b);
@@ -559,7 +629,7 @@ void bms_clear_faults(bms_t *b)
     mosfets(b);
     /* Same hardware outputs as a tick. A hot sample must drop the bleed
        even when this call does not latch a new fault bit. */
-    balance(b, &s);
+    balance(b, &adj);
     publish(b);
     mode_of(b);
 }

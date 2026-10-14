@@ -36,13 +36,16 @@
 #define BMS_BAL_DV_MV       25
 #define BMS_BAL_MIN_MV      3400
 #define BMS_BAL_MAX         4       /* bleed resistors: at most 4 cells at once */
-/* Bleed sags the cell it is measuring. Stay on for 1.0 s, then one tick off,
-   so the next decision uses an unloaded sample. */
+/* Bleed sags the cell it is measuring. Stay on for 1.0 s, then off for
+   BMS_BAL_OFF_TICKS so the fault wait can finish on an unloaded sample. */
 #define BMS_BAL_ON_TICKS    100
 #define BMS_REST_MA         500
 #define BMS_LEAK_MA         2000    /* 2 A, in mA, through a FET commanded open */
 #define BMS_REST_MS         30000
 #define BMS_DEB_TICKS       20      /* 200 ms */
+/* Off window after each bleed. Matches the fault wait, so a sagged sample
+   cannot be the one that releases or completes that wait. */
+#define BMS_BAL_OFF_TICKS   BMS_DEB_TICKS
 /* Capacity is learned only from rest snaps at a mild temperature.
    Cold capacity is not fade. 15.0 °C .. 40.0 °C. */
 #define BMS_LEARN_TMIN_DC   150
@@ -122,7 +125,8 @@ typedef struct {
     uint8_t  hold_dsg_cold;       /* 20 A discharge from -10 C until -5 C */
     uint8_t  leak_live;           /* 1 after the first FET command. Init is not a leak. */
     uint8_t  bal_left;            /* on-ticks still to command in this window */
-    uint8_t  bal_gap;             /* 1 after the unloaded tick; keep the 2 A hold */
+    uint8_t  bal_gap;             /* unloaded samples left before the next choice */
+    int16_t  cell_off_mv[BMS_N_CELL]; /* last mV taken with that resistor off */
     uint8_t  rest_snap;           /* 1 after this rest has applied an OCV snap */
     uint32_t rest_ms;
     int64_t  soc_resid;
