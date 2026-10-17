@@ -501,14 +501,14 @@ static void balance(bms_t *b, const bms_sample_t *s)
         b->bal_left = 0;
         b->bal_gap = 0;
     } else if (b->bal_mask != 0) {
-        if (b->bal_left > 1 && top_ok) {
+        /* The resistors are still on, so this spread is not the one that
+           ends the session. Finish the second, then judge the top unloaded. */
+        if (b->bal_left > 1) {
             b->bal_left--;
             mask = b->bal_mask;
         } else {
-            /* Window done, or the top fell out of range. A still-valid top
-               is only a measurement gap, so the 2 A hold continues. */
             b->bal_left = 0;
-            b->bal_gap = top_ok ? (uint8_t)BMS_BAL_OFF_TICKS : 0;
+            b->bal_gap = (uint8_t)BMS_BAL_OFF_TICKS;
         }
     } else if (b->bal_gap > 0) {
         b->bal_gap--;

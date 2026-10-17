@@ -583,6 +583,36 @@ int main(void)
     ticks(&b, 1);
     expect("balance ends at 2.5 A during a window", g_bal == 0);
 
+    /* A spread that closes under the resistors is not a stop. The mask
+       finishes its second. The first unloaded sample ends it, and 1.5 A
+       does not start another session. */
+    idle_pack();
+    set_cells(3450);
+    g_s.cell_mv[0] = 3520;
+    g_s.pack_ma = 0;
+    ticks(&b, 1);
+    expect("balance on before the spread closes", g_bal == 1u);
+    g_s.pack_ma = 1500;
+    set_cells(3500);
+    g_s.cell_mv[0] = 3520;
+    ticks(&b, 1);
+    expect("loaded spread does not drop the mask", g_bal == 1u);
+    ticks(&b, 98);
+    expect("mask held for the rest of the second", g_bal == 1u);
+    ticks(&b, 1);
+    expect("window still ends with the resistors off", g_bal == 0);
+    ticks(&b, 1);
+    expect("unloaded sample ends the session", g_bal == 0 && b.bal_gap == 0);
+    ticks(&b, 5);
+    expect("1.5 A does not restart after the top left", g_bal == 0);
+    g_s.pack_ma = 0;
+    ticks(&b, 2);
+    expect("rest does not restart a closed spread", g_bal == 0);
+    set_cells(3450);
+    g_s.cell_mv[0] = 3520;
+    ticks(&b, 1);
+    expect("rest restarts once the spread is back", g_bal == 1u);
+
     /* The resistor pulls the cell down. Charge limits, the published
        voltage, and a latched voltage fault stay on the last open reading. */
     bms_init(&b, 200000, 500);
