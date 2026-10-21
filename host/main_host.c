@@ -636,6 +636,45 @@ int main(void)
     ticks(&b, 5);
     expect("bled sag does not raise cutoff", b.min_dsg_v_x10 == 448);
 
+    /* The high reading arrives after the resistor is already on. A sag must
+       not fall back to the older open-resistor sample and drop the 5 A cap,
+       or wipe the over-voltage wait that 3.66 V started. */
+    bms_init(&b, 200000, 500);
+    idle_pack();
+    ticks(&b, 2);
+    set_cells(3400);
+    g_s.cell_mv[0] = 3520;
+    g_s.pack_ma = 0;
+    ticks(&b, 1);
+    expect("bleed holds the 3.52 V sample", g_bal == 1u && b.cell_mv[0] == 3520);
+    expect("3.52 V cap is 20 A", b.allow_chg_a == 20);
+    g_s.cell_mv[0] = 3660;
+    ticks(&b, 19);
+    expect("rise during bleed is 5 A", b.allow_chg_a == 5 && b.cell_mv[0] == 3660);
+    expect("rise during bleed holds cv", b.max_chg_v_x10 == 546);
+    expect("rise during bleed has not latched", !(b.fault & BMS_FLT_OV) && g_chg == 1);
+    g_s.cell_mv[0] = 3400;
+    ticks(&b, 1);
+    expect("sag keeps the 5 A cap", b.allow_chg_a == 5 && b.cell_mv[0] == 3660);
+    expect("sag keeps the cv hold", b.max_chg_v_x10 == 546);
+    expect("sag does not latch or clear the wait", !(b.fault & BMS_FLT_OV) && g_chg == 1);
+    bms_clear_faults(&b);
+    expect("clear_faults keeps the risen cell", b.cell_mv[0] == 3660 && b.allow_chg_a == 5);
+    expect("clear_faults does not drop the wait", !(b.fault & BMS_FLT_OV) && g_bal != 0);
+    g_s.cell_mv[0] = 3660;
+    ticks(&b, 2);
+    expect("kept wait latches after the sag", (b.fault & BMS_FLT_OV) && g_chg == 0);
+    g_s.cell_mv[0] = 3400;
+    bms_clear_faults(&b);
+    expect("clear_faults keeps latched ov through the sag", (b.fault & BMS_FLT_OV) && b.cell_mv[0] == 3660);
+    g_s.pack_ma = 2500;
+    ticks(&b, 1);
+    expect("discharge stops bleed with ov held", g_bal == 0 && (b.fault & BMS_FLT_OV));
+    g_s.pack_ma = 0;
+    g_s.cell_mv[0] = 3480;
+    ticks(&b, 1);
+    expect("unloaded 3.48 V releases the risen ov", !(b.fault & BMS_FLT_OV) && g_chg == 1);
+
     bms_init(&b, 200000, 500);
     idle_pack();
     ticks(&b, 2);

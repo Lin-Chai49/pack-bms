@@ -107,9 +107,11 @@ static void live_span(const bms_sample_t *s, int16_t *vmax, int16_t *vmin)
     }
 }
 
-/* A cell in the mask was read with its bleed resistor on. A lower in-range
-   reading is the resistor, not the cell. An open wire still passes through,
-   and a higher reading still counts. Unloaded samples replace the floor. */
+/* A cell in the mask was read with its bleed resistor on. Remember the
+   highest in-range reading since that resistor turned on, starting from the
+   last sample taken with it off. A lower reading is the resistor, not the
+   cell. An open wire still passes through. The next sample with the mask
+   clear replaces this memory. */
 static void bleed_floor(bms_t *b, const bms_sample_t *raw, bms_sample_t *adj)
 {
     int i;
@@ -123,7 +125,8 @@ static void bleed_floor(bms_t *b, const bms_sample_t *raw, bms_sample_t *adj)
         int16_t live = raw->cell_mv[i];
         if ((b->bal_mask & (uint16_t)(1u << i)) == 0) continue;
         if (live < BMS_OW_LO_MV || live > BMS_OW_HI_MV) continue;
-        if (live < b->cell_off_mv[i]) adj->cell_mv[i] = b->cell_off_mv[i];
+        if (live > b->cell_off_mv[i]) b->cell_off_mv[i] = live;
+        adj->cell_mv[i] = b->cell_off_mv[i];
     }
 }
 

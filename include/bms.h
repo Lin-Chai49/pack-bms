@@ -126,7 +126,7 @@ typedef struct {
     uint8_t  leak_live;           /* 1 after the first FET command. Init is not a leak. */
     uint8_t  bal_left;            /* on-ticks still to command in this window */
     uint8_t  bal_gap;             /* unloaded samples left before the next choice */
-    int16_t  cell_off_mv[BMS_N_CELL]; /* last mV taken with that resistor off */
+    int16_t  cell_off_mv[BMS_N_CELL]; /* highest in-range mV since that resistor was off */
     uint8_t  rest_snap;           /* 1 after this rest has applied an OCV snap */
     uint32_t rest_ms;
     int64_t  soc_resid;
