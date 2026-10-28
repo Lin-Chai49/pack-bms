@@ -138,6 +138,6 @@ typedef struct {
 
 void bms_init(bms_t *b, uint32_t cap_mah, uint16_t soc_x10);
 void bms_tick(bms_t *b);          /* call every BMS_TICK_MS */
-void bms_clear_faults(bms_t *b);  /* re-sample; clear bits past release. Does not trip. */
+void bms_clear_faults(bms_t *b);  /* re-sample; clear bits past release. Does not trip or advance balance. */
 
 #endif

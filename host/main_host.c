@@ -613,6 +613,45 @@ int main(void)
     ticks(&b, 1);
     expect("rest restarts once the spread is back", g_bal == 1u);
 
+    /* clear_faults is not a tick. A loop of it must not spend the 1.0 s,
+       finish the 200 ms, start a window, or chatter the resistors.
+       Discharge at 2 A or more still turns them off on that call. */
+    bms_init(&b, 200000, 500);
+    idle_pack();
+    ticks(&b, 2);
+    set_cells(3450);
+    g_s.cell_mv[0] = 3520;
+    g_s.pack_ma = 0;
+    {
+        int i;
+        for (i = 0; i < 40; i++) bms_clear_faults(&b);
+    }
+    expect("clear loop does not start bleed", g_bal == 0 && b.bal_left == 0);
+    ticks(&b, 1);
+    expect("bleed on before clear loop", g_bal == 1u && b.bal_left == 100);
+    {
+        int i;
+        for (i = 0; i < 50; i++) bms_clear_faults(&b);
+    }
+    expect("clear loop keeps the bleed mask", g_bal == 1u);
+    expect("clear loop does not spend the window", b.bal_left == 100 && b.bal_gap == 0);
+    ticks(&b, 99);
+    expect("window still has its last on tick", g_bal == 1u);
+    ticks(&b, 1);
+    expect("window still ends on the tick", g_bal == 0 && b.bal_gap == 20);
+    {
+        int i;
+        for (i = 0; i < 30; i++) bms_clear_faults(&b);
+    }
+    expect("clear loop does not spend the gap", g_bal == 0 && b.bal_gap == 20);
+    ticks(&b, 19);
+    expect("gap still measuring after clears", g_bal == 0);
+    ticks(&b, 1);
+    expect("gap still recruits on its own last tick", g_bal != 0);
+    g_s.pack_ma = 2500;
+    bms_clear_faults(&b);
+    expect("clear at 2.5 A drops bleed", g_bal == 0 && b.bal_left == 0 && b.bal_gap == 0);
+
     /* The resistor pulls the cell down. Charge limits, the published
        voltage, and a latched voltage fault stay on the last open reading. */
     bms_init(&b, 200000, 500);

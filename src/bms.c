@@ -488,7 +488,11 @@ static uint16_t pick_balance(const bms_sample_t *s, const bms_t *b)
     return mask;
 }
 
-static void balance(bms_t *b, const bms_sample_t *s)
+/* `advance` is 0 from bms_clear_faults(). That call is not a tick: keep the
+   mask already commanded, and do not spend the 1.0 s or the 200 ms. A loop
+   of it must not chatter the resistors. A hot sample, an open wire, or
+   discharge at 2 A or more still turns them off. */
+static void balance(bms_t *b, const bms_sample_t *s, int advance)
 {
     uint16_t mask = 0;
     int32_t spread = (int32_t)b->v_max_mv - (int32_t)b->v_min_mv;
@@ -506,6 +510,13 @@ static void balance(bms_t *b, const bms_sample_t *s)
     if (!current_ok || open_wire(b) || b->t_max_dC >= BMS_CHG_OT_DC) {
         b->bal_left = 0;
         b->bal_gap = 0;
+    } else if (!advance) {
+        /* Resistors already off, and this unloaded sample is no longer a
+           top-of-charge pack: end the session. Do not recruit. */
+        if (b->bal_mask == 0 && !top_ok)
+            b->bal_gap = 0;
+        else
+            mask = b->bal_mask;
     } else if (b->bal_mask != 0) {
         /* The resistors are still on, so this spread is not the one that
            ends the session. Finish the second, then judge the top unloaded. */
@@ -600,7 +611,7 @@ void bms_tick(bms_t *b)
     mosfets(b);
     soc_step(b);
     soc_rest(b);
-    balance(b, &adj);
+    balance(b, &adj, 1);
     publish(b);
     mode_of(b);
 }
@@ -613,9 +624,9 @@ void bms_clear_faults(bms_t *b)
     int ow;
     if (!b) return;
     /* Re-sample and drop bits that are past release. Do not advance debounce
-       — calling this in a tight loop must not trip OV in microseconds.
-       The sag floor still applies, so a bleeding cell's low reading cannot
-       clear a voltage fault. */
+       or the bleed window — a tight loop must not trip OV in microseconds
+       or chatter the resistors. The sag floor still applies, so a bleeding
+       cell's low reading cannot clear a voltage fault. */
     bms_hal_sample(&raw);
     bleed_floor(b, &raw, &adj);
     pack_stats(b, &adj);
@@ -635,7 +646,7 @@ void bms_clear_faults(bms_t *b)
     mosfets(b);
     /* Same hardware outputs as a tick. A hot sample must drop the bleed
        even when this call does not latch a new fault bit. */
-    balance(b, &adj);
+    balance(b, &adj, 0);
     publish(b);
     mode_of(b);
 }
