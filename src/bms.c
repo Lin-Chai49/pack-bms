@@ -264,9 +264,10 @@ static void sop(bms_t *b, int chg, int dsg)
     if (cv > 65535) cv = 65535;
     b->max_chg_v_x10 = (uint16_t)cv;
 
-    /* 44.8 V until a cell sags through 2.80 V. Then hold the present pack
-       voltage until that cell is back to 2.90 V, so a small rebound does
-       not drop the cutoff and let the inverter start into the same cell. */
+    /* 44.8 V until a cell sags through 2.80 V. Then the cutoff becomes the
+       present pack voltage and stays up until that cell is back to 2.90 V.
+       A later reading may raise it. A lower one must not: the inverter
+       would follow the dip and keep emptying the cell that already sagged. */
     dv = (int32_t)BMS_N_CELL * BMS_CELL_UV_REL_MV / 100; /* 16 × 2.80 V → 448 */
     {
         int floor = (int)dv;
@@ -275,6 +276,8 @@ static void sop(bms_t *b, int chg, int dsg)
         if (sag) {
             int32_t hold = b->pack_mv / 100;
             if (hold > dv) dv = hold;
+            if ((int32_t)b->min_dsg_v_x10 > dv)
+                dv = (int32_t)b->min_dsg_v_x10;
         }
     }
     if (dv < 0) dv = 0;

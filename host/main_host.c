@@ -1041,6 +1041,24 @@ int main(void)
     ticks(&b, 5);
     expect("cutoff releases at 2.90 V", b.min_dsg_v_x10 == 448);
 
+    /* Once raised, a lower pack sample must not walk the cutoff down.
+       The 2.85 V case above is allowed to rise with the pack. */
+    set_cells(3000);
+    g_s.cell_mv[3] = 2700;
+    ticks(&b, 2);
+    expect("cutoff rises again at 2.70 V", b.min_dsg_v_x10 == 477);
+    set_cells(2900);
+    g_s.cell_mv[3] = 2700; /* pack 46.2 V, spread 200 mV */
+    ticks(&b, 5);
+    expect("cutoff ignores a lower pack sample", b.min_dsg_v_x10 == 477);
+    g_s.cell_mv[3] = 2850; /* pack 46.35 V, still under 2.90 V */
+    ticks(&b, 2);
+    expect("cutoff stays above the recovered pack", b.min_dsg_v_x10 == 477);
+    set_cells(3000);
+    g_s.cell_mv[3] = 2900;
+    ticks(&b, 2);
+    expect("cutoff releases after the held dip", b.min_dsg_v_x10 == 448);
+
     bms_init(&b, 200000, 500);
     idle_pack();
     ticks(&b, 2);
