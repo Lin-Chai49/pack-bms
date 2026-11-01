@@ -520,6 +520,55 @@ int main(void)
     expect("full clears below 3.50 V", (b.flags & BMS_FLG_FULL) == 0);
     expect("chg allowed after full clears", b.allow_chg_a == 10);
 
+    /* The sample before the first command is not a taper: both FETs are open. */
+    bms_init(&b, 200000, 980);
+    set_cells(3520);
+    g_s.pack_ma = 0;
+    ticks(&b, 1);
+    expect("boot sample is not charge complete",
+           (b.flags & BMS_FLG_FULL) == 0 && b.allow_chg_a == 10 && g_chg == 1);
+    ticks(&b, 1);
+    expect("next closed sample finishes the charge",
+           (b.flags & BMS_FLG_FULL) != 0 && b.allow_chg_a == 0 && g_chg == 1);
+
+    /* 8 A at 3.52 V and 96% is still the taper. Opening the charge FET
+       drops the current to zero. That zero is the open path, not a finish.
+       When the pack cools, 8 A must still be allowed in. */
+    bms_init(&b, 200000, 960);
+    idle_pack();
+    ticks(&b, 2);
+    set_cells(3520);
+    g_s.pack_ma = -8000;
+    ticks(&b, 2);
+    expect("8A at 3.52 V is not full",
+           (b.flags & BMS_FLG_FULL) == 0 && b.allow_chg_a == 20 && g_chg == 1);
+    g_s.t_dC[0] = 550;
+    ticks(&b, 1);
+    expect("55C opens charge before the taper",
+           g_chg == 0 && (b.flags & BMS_FLG_FULL) == 0);
+    g_s.pack_ma = 0;
+    ticks(&b, 5);
+    expect("open fet zero is not full", (b.flags & BMS_FLG_FULL) == 0 && g_chg == 0);
+    bms_clear_faults(&b);
+    expect("clear on open fet is not full", (b.flags & BMS_FLG_FULL) == 0 && g_chg == 0);
+    /* The recovering sample is still the open FET, so its 0 A is not a taper.
+       Eight amps on the next sample is charge through a FET that just closed,
+       not current through one that was already open. */
+    g_s.t_dC[0] = 250;
+    g_s.pack_ma = 0;
+    ticks(&b, 1);
+    expect("charge fet closes without finishing",
+           (b.flags & BMS_FLG_FULL) == 0 && b.allow_chg_a == 20 && g_chg == 1);
+    g_s.pack_ma = -8000;
+    ticks(&b, 1);
+    expect("8A resumes after the open fet",
+           (b.flags & BMS_FLG_FULL) == 0 && b.allow_chg_a == 20 && g_chg == 1);
+    g_s.pack_ma = -1000;
+    ticks(&b, 1);
+    expect("closed fet under 3A finishes",
+           (b.flags & BMS_FLG_FULL) != 0 && b.allow_chg_a == 0 && g_chg == 1);
+    idle_pack();
+
     /* At most 4 bleed resistors at once. */
     idle_pack();
     set_cells(3450);

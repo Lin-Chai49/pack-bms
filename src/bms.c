@@ -198,16 +198,19 @@ static void protect(bms_t *b, const bms_sample_t *raw)
 }
 
 /* True once the pack has finished charging, until the cell or SOC leaves.
-   Current is only the way in: a spike above 3 A must not turn charge back on. */
-static int charge_done(const bms_t *b)
+   Current is only the way in: a spike above 3 A must not turn charge back on.
+   chg_closed is the charge FET command that applied to this sample. An
+   open FET reads near zero because the path is open, and that is not a taper. */
+static int charge_done(const bms_t *b, int chg_closed)
 {
     int32_t ia = iabs_sat(b->pack_ma);
     if (b->v_max_mv < BMS_CELL_OV_REL_MV || b->soc_x10 < 950) return 0;
-    if (ia < 3000) return 1;
-    return (b->flags & BMS_FLG_FULL) != 0;
+    if (b->flags & BMS_FLG_FULL) return 1;
+    if (!chg_closed) return 0;
+    return ia < 3000;
 }
 
-static void sop(bms_t *b, int chg, int dsg)
+static void sop(bms_t *b, int chg, int dsg, int chg_closed)
 {
     uint16_t ca = (uint16_t)(BMS_OCC_MA / 1000);
     uint16_t da = (uint16_t)(BMS_OCD_MA / 1000);
@@ -232,7 +235,7 @@ static void sop(bms_t *b, int chg, int dsg)
         if (b->soc_x10 >= 980) ca = umin(ca, 10);
         else if (b->soc_x10 >= 950) ca = umin(ca, 40);
 
-        if (charge_done(b)) ca = 0;
+        if (charge_done(b, chg_closed)) ca = 0;
     }
 
     if (!dsg) da = 0;
@@ -292,9 +295,13 @@ static void hold_temp(uint8_t *hold, int trip, int release)
     else if (release) *hold = 0;
 }
 
-static void mosfets(bms_t *b)
+/* Returns the charge-FET command that applied to this sample, before the
+   update below. sop and publish both need it: the new command is not the
+   path this current flowed through. */
+static int mosfets(bms_t *b)
 {
     int chg = 1, dsg = 1;
+    int chg_closed;
 
     hold_temp(&b->hold_chg_ot, b->t_max_dC >= BMS_CHG_OT_DC, b->t_max_dC <= BMS_CHG_OT_REL_DC);
     hold_temp(&b->hold_chg_ut, b->t_min_dC <= BMS_CHG_UT_DC, b->t_min_dC >= BMS_CHG_UT_REL_DC);
@@ -323,13 +330,15 @@ static void mosfets(bms_t *b)
         if (!(b->status & BMS_ST_DSG_MOS)) dsg = 0;
     }
 
+    chg_closed = (b->status & BMS_ST_CHG_MOS) != 0;
     if (chg) b->status |= BMS_ST_CHG_MOS; else b->status &= (uint16_t)~BMS_ST_CHG_MOS;
     if (dsg) b->status |= BMS_ST_DSG_MOS; else b->status &= (uint16_t)~BMS_ST_DSG_MOS;
     b->leak_live = 1;
 
     bms_hal_set_chg_mos(chg);
     bms_hal_set_dsg_mos(dsg);
-    sop(b, chg, dsg);
+    sop(b, chg, dsg, chg_closed);
+    return chg_closed;
 }
 
 /* Usable capacity stays inside half..full nameplate. A restored value
@@ -547,7 +556,7 @@ static void balance(bms_t *b, const bms_sample_t *s, int advance)
     bms_hal_set_balance(mask);
 }
 
-static void publish(bms_t *b)
+static void publish(bms_t *b, int chg_closed)
 {
     uint16_t w = 0, g = 0;
     int32_t dv = (int32_t)b->v_max_mv - (int32_t)b->v_min_mv;
@@ -564,7 +573,7 @@ static void publish(bms_t *b)
     if (b->soc_x10 >= 950) w |= BMS_WRN_HIGH;
     b->warn = w;
 
-    if (charge_done(b)) g |= BMS_FLG_FULL;
+    if (charge_done(b, chg_closed)) g |= BMS_FLG_FULL;
     if (b->v_min_mv <= BMS_CELL_UV_REL_MV || b->soc_x10 <= 50) g |= BMS_FLG_EMPTY;
     /* Coldest cell wants heat, but not if another sensor is already hot. */
     if (b->t_min_dC <= BMS_CHG_UT_REL_DC && b->t_max_dC < BMS_CHG_OT_REL_DC)
@@ -603,16 +612,17 @@ void bms_init(bms_t *b, uint32_t cap_mah, uint16_t soc_x10)
 void bms_tick(bms_t *b)
 {
     bms_sample_t raw, adj;
+    int chg_closed;
     if (!b) return;
     bms_hal_sample(&raw);
     bleed_floor(b, &raw, &adj);
     pack_stats(b, &adj);
     protect(b, &raw);
-    mosfets(b);
+    chg_closed = mosfets(b);
     soc_step(b);
     soc_rest(b);
     balance(b, &adj, 1);
-    publish(b);
+    publish(b, chg_closed);
     mode_of(b);
 }
 
@@ -622,6 +632,7 @@ void bms_clear_faults(bms_t *b)
     uint16_t f;
     int32_t dv;
     int ow;
+    int chg_closed;
     if (!b) return;
     /* Re-sample and drop bits that are past release. Do not advance debounce
        or the bleed window — a tight loop must not trip OV in microseconds
@@ -643,10 +654,10 @@ void bms_clear_faults(bms_t *b)
     if (!ow) { b->db_ow = 0; f &= (uint16_t)~BMS_FLT_OW; }
     if (leak_rel(b)) { b->db_leak = 0; f &= (uint16_t)~BMS_FLT_LEAK; }
     b->fault = f;
-    mosfets(b);
+    chg_closed = mosfets(b);
     /* Same hardware outputs as a tick. A hot sample must drop the bleed
        even when this call does not latch a new fault bit. */
     balance(b, &adj, 0);
-    publish(b);
+    publish(b, chg_closed);
     mode_of(b);
 }
