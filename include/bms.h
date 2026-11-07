@@ -46,8 +46,9 @@
 /* Off window after each bleed. Matches the fault wait, so a sagged sample
    cannot be the one that releases or completes that wait. */
 #define BMS_BAL_OFF_TICKS   BMS_DEB_TICKS
-/* Capacity is learned only from rest snaps at a mild temperature.
-   Cold capacity is not fade. 15.0 °C .. 40.0 °C. */
+/* Capacity is learned only across a mild temperature. Cold capacity is
+   not fade. 15.0 °C .. 40.0 °C, at both snaps and on every sample between
+   them. One sample outside that window drops the open measurement. */
 #define BMS_LEARN_TMIN_DC   150
 #define BMS_LEARN_TMAX_DC   400
 

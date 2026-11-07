@@ -396,6 +396,16 @@ static int learn_temp_ok(const bms_t *b)
     return b->t_min_dC >= BMS_LEARN_TMIN_DC && b->t_max_dC <= BMS_LEARN_TMAX_DC;
 }
 
+/* An open measurement dies when any present sensor leaves 15.0–40.0 °C.
+   Coulombs taken there are cold or hot capacity, not fade. The next
+   in-range snap at either end starts a new measurement. A missing
+   thermistor is reported as 60 °C and fails this same test. */
+static void learn_gate(bms_t *b)
+{
+    if (!learn_temp_ok(b))
+        b->learn_end = 0;
+}
+
 /* Scale the coulombs between two opposite rest snaps up to a full capacity
    and take one quarter of the error. One noisy stroke must not collapse
    the pack. Below half the nameplate is a bad measurement, not fade. */
@@ -620,6 +630,7 @@ void bms_tick(bms_t *b)
     protect(b, &raw);
     chg_closed = mosfets(b);
     soc_step(b);
+    learn_gate(b);
     soc_rest(b);
     balance(b, &adj, 1);
     publish(b, chg_closed);
@@ -641,6 +652,9 @@ void bms_clear_faults(bms_t *b)
     bms_hal_sample(&raw);
     bleed_floor(b, &raw, &adj);
     pack_stats(b, &adj);
+    /* Not a tick, but the temperature is real. A cold sample here must
+       not leave a warm-looking stroke open. */
+    learn_gate(b);
     f = b->fault;
     dv = (int32_t)b->v_max_mv - (int32_t)b->v_min_mv;
     ow = open_wire(b);

@@ -1060,6 +1060,44 @@ int main(void)
     ticks(&b, 3000);
     expect("cold arrival does not fade", b.cap_mah == 20000);
 
+    /* Same 9.3 Ah, with 100 ticks at 10.0 °C in the middle. Both ends are
+       warm. Those cold coulombs are not fade. The arrival starts a new
+       measurement, so the warm return stroke still moves a quarter. */
+    bms_init(&b, 20000, 500);
+    idle_pack();
+    ticks(&b, 2);
+    set_cells(3100);
+    g_s.pack_ma = 0;
+    ticks(&b, 3000);
+    g_s.pack_ma = -100000;
+    ticks(&b, 16000);
+    g_s.t_dC[0] = 100;
+    ticks(&b, 100);
+    g_s.t_dC[0] = 250;
+    ticks(&b, 17380);
+    set_cells(3500);
+    g_s.pack_ma = 0;
+    ticks(&b, 3000);
+    expect("cold middle does not fade", b.cap_mah == 20000);
+    g_s.pack_ma = 100000;
+    ticks(&b, 33480);
+    set_cells(3100);
+    g_s.pack_ma = 0;
+    ticks(&b, 3000);
+    expect("warm stroke after a cold middle still fades", b.cap_mah == 17500);
+
+    /* clear_faults is not a tick. Its sample is still a temperature.
+       One cold call drops the anchor the return snap just took. */
+    g_s.t_dC[0] = 100;
+    bms_clear_faults(&b);
+    g_s.t_dC[0] = 250;
+    g_s.pack_ma = -100000;
+    ticks(&b, 33480);
+    set_cells(3500);
+    g_s.pack_ma = 0;
+    ticks(&b, 3000);
+    expect("cold clear_faults does not fade", b.cap_mah == 17500);
+
     /* Same 9.3 Ah, but the current is discharge while the rest voltage rises.
        Taking the absolute value would fake a 10 Ah capacity. */
     bms_init(&b, 20000, 500);
