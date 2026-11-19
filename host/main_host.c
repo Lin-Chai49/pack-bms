@@ -942,6 +942,87 @@ int main(void)
     ticks(&b, 3600);
     expect("closed dsg fet counts discharge", b.soc_x10 == 495);
 
+    /* Coulomb count uses the FET command that applied to this sample.
+       100 A × 10 ms = 1,000,000 mA·ms. Closing, including the first tick,
+       is still the open path. Opening is still the closed path. */
+    bms_init(&b, 200000, 500);
+    idle_pack();
+    g_s.pack_ma = 100000;
+    ticks(&b, 1);
+    expect("boot discharge does not count",
+           b.soc_x10 == 500 && b.soc_resid == 0 && b.cyc_resid == 0
+           && b.learn_resid == 0 && g_dsg == 1 && !(b.fault & BMS_FLT_LEAK));
+    ticks(&b, 1);
+    expect("next tick counts the discharge",
+           b.soc_resid == 1000000 && b.cyc_resid == 1000000 && b.learn_resid == 1000000);
+
+    bms_init(&b, 200000, 500);
+    idle_pack();
+    g_s.pack_ma = -100000;
+    ticks(&b, 1);
+    expect("boot charge does not count",
+           b.soc_x10 == 500 && b.soc_resid == 0 && b.cyc_resid == 0 && g_chg == 1);
+    ticks(&b, 1);
+    expect("next tick counts the charge",
+           b.soc_resid == -1000000 && b.learn_resid == -1000000 && b.cyc_resid == 0);
+
+    bms_init(&b, 200000, 500);
+    idle_pack();
+    ticks(&b, 2);
+    g_s.pack_ma = -100000;
+    g_s.t_dC[0] = 550;
+    ticks(&b, 1);
+    expect("opening tick at 55C still counts",
+           g_chg == 0 && b.soc_resid == -1000000 && b.learn_resid == -1000000);
+    ticks(&b, 1);
+    expect("open charge fet stops the count",
+           g_chg == 0 && b.soc_resid == -1000000 && !(b.fault & BMS_FLT_LEAK));
+
+    bms_init(&b, 200000, 500);
+    idle_pack();
+    ticks(&b, 2);
+    g_s.pack_ma = 160000;
+    ticks(&b, 20);
+    expect("over-current tick still counts",
+           (b.fault & BMS_FLT_OCD) && g_dsg == 0 && g_chg == 1
+           && b.soc_x10 == 500 && b.soc_resid == 32000000
+           && b.cyc_resid == 32000000 && b.learn_resid == 32000000);
+    ticks(&b, 1);
+    expect("open discharge fet stops the count",
+           g_dsg == 0 && b.soc_resid == 32000000 && b.cyc_resid == 32000000
+           && !(b.fault & BMS_FLT_LEAK));
+
+    bms_init(&b, 200000, 500);
+    idle_pack();
+    ticks(&b, 2);
+    set_cells(3700);
+    g_s.pack_ma = 0;
+    ticks(&b, 25);
+    expect("OV open before the close sample", (b.fault & BMS_FLT_OV) && g_chg == 0);
+    set_cells(3480);
+    g_s.pack_ma = -1500; /* under the 2 A leak hold, so the FET may close */
+    ticks(&b, 1);
+    expect("closing sample does not count",
+           !(b.fault & BMS_FLT_OV) && g_chg == 1 && b.soc_resid == 0 && b.learn_resid == 0);
+    ticks(&b, 1);
+    expect("following closed sample counts",
+           g_chg == 1 && b.soc_resid == -15000 && b.learn_resid == -15000);
+
+    bms_init(&b, 200000, 500);
+    idle_pack();
+    ticks(&b, 2);
+    set_cells(3700);
+    g_s.pack_ma = 0;
+    ticks(&b, 25);
+    set_cells(3480);
+    g_s.pack_ma = -1500;
+    bms_clear_faults(&b);
+    expect("clear_faults close does not count",
+           g_chg == 1 && !(b.fault & BMS_FLT_OV) && b.soc_resid == 0 && b.learn_resid == 0);
+    ticks(&b, 1);
+    expect("tick after clear_faults counts",
+           b.soc_resid == -15000 && b.learn_resid == -15000);
+
     /* Rest OCV snap only at the LFP ends, after 30 s. */
     bms_init(&b, 200000, 500);
     idle_pack();

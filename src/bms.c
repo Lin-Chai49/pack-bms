@@ -354,7 +354,11 @@ static void cap_hold(bms_t *b)
     else if (b->cap_mah < floor) b->cap_mah = floor;
 }
 
-static void soc_step(bms_t *b)
+/* chg_closed / dsg_closed are the commands that applied to this sample.
+   The bits in status are the next command. Current on the sample that
+   closes a FET, including the first tick after init, did not flow
+   through it. Current on the sample that opens a FET did. */
+static void soc_step(bms_t *b, int chg_closed, int dsg_closed)
 {
     int64_t step;
     int32_t ma = b->pack_ma;
@@ -363,8 +367,8 @@ static void soc_step(bms_t *b)
     if (step <= 0) return;
     /* An open FET is not a path. A shunt offset during a latched fault
        must not walk SOC for hours. */
-    if (ma < 0 && !(b->status & BMS_ST_CHG_MOS)) ma = 0;
-    if (ma > 0 && !(b->status & BMS_ST_DSG_MOS)) ma = 0;
+    if (ma < 0 && !chg_closed) ma = 0;
+    if (ma > 0 && !dsg_closed) ma = 0;
     b->soc_resid += (int64_t)ma * BMS_TICK_MS;
     b->learn_resid += (int64_t)ma * BMS_TICK_MS;
     while (b->soc_resid >= step && b->soc_x10 > 0) {
@@ -622,14 +626,17 @@ void bms_init(bms_t *b, uint32_t cap_mah, uint16_t soc_x10)
 void bms_tick(bms_t *b)
 {
     bms_sample_t raw, adj;
-    int chg_closed;
+    int chg_closed, dsg_closed;
     if (!b) return;
     bms_hal_sample(&raw);
     bleed_floor(b, &raw, &adj);
     pack_stats(b, &adj);
     protect(b, &raw);
+    /* Discharge command that applied to this sample. mosfets() returns
+       the charge one, then replaces both bits with the next command. */
+    dsg_closed = (b->status & BMS_ST_DSG_MOS) != 0;
     chg_closed = mosfets(b);
-    soc_step(b);
+    soc_step(b, chg_closed, dsg_closed);
     learn_gate(b);
     soc_rest(b);
     balance(b, &adj, 1);
